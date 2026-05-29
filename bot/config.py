@@ -6,6 +6,7 @@ from bot.intraday.config import IntradayConfig
 @dataclass
 class V4Config(IntradayConfig):
     # --- V4 overrides of V3 defaults ---
+    max_open_positions: int = 15
     max_sector_positions: int = 5
     min_price: float = 0.50
     max_price: float = float("inf")
