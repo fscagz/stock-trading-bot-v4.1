@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 _ASSETS_URL = "https://paper-api.alpaca.markets/v2/assets"
 _SNAPSHOTS_URL = "https://data.alpaca.markets/v2/stocks/snapshots"
 _BATCH_SIZE = 1000
-_EXCHANGE_ALLOWLIST = {"NYSE", "NASDAQ", "AMEX", "ARCA"}
+_EXCHANGE_ALLOWLIST = {"NYSE", "NASDAQ", "AMEX"}
 
 
 class MarketScanner:
