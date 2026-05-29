@@ -1,13 +1,18 @@
 from __future__ import annotations
 import logging
 from datetime import timezone
-from typing import Callable, List, Optional
+from typing import Callable, List, Optional, Set
 
 from bot.intraday.types import Bar
 
 logger = logging.getLogger(__name__)
 
 BarHandler = Callable[[Bar], None]
+
+try:
+    from alpaca.data.live import StockDataStream
+except ImportError:
+    StockDataStream = None  # type: ignore[assignment,misc]
 
 
 class BarStream:
@@ -18,26 +23,39 @@ class BarStream:
         stream.set_handler(my_handler)
         stream.run()   # blocks; run in a thread
 
-    The handler is called with a Bar on each incoming 1-min bar.
+    Call subscribe/unsubscribe while running to add/remove symbols dynamically.
     """
 
     def __init__(self, api_key: str, secret_key: str, symbols: List[str]) -> None:
         self._api_key = api_key
         self._secret_key = secret_key
-        self._symbols = symbols
+        self._symbols: Set[str] = set(symbols)
         self._handler: Optional[BarHandler] = None
+        self._client = None
+
+    @property
+    def symbols(self) -> Set[str]:
+        return self._symbols
 
     def set_handler(self, handler: BarHandler) -> None:
         self._handler = handler
 
-    def run(self) -> None:
-        try:
-            from alpaca.data.live import StockDataStream
-        except ImportError:
-            raise RuntimeError("alpaca-py is required: pip install alpaca-py")
+    def subscribe(self, symbol: str) -> None:
+        if symbol in self._symbols:
+            return
+        self._symbols.add(symbol)
+        if self._client is not None:
+            self._client.subscribe_bars(self._make_on_bar(), symbol)
 
-        stream = StockDataStream(self._api_key, self._secret_key)
+    def unsubscribe(self, symbol: str) -> None:
+        self._symbols.discard(symbol)
+        if self._client is not None:
+            try:
+                self._client.unsubscribe_bars(symbol)
+            except Exception as exc:
+                logger.warning("Unsubscribe failed for %s: %s", symbol, exc)
 
+    def _make_on_bar(self) -> Callable:
         async def _on_bar(data) -> None:
             ts = data.timestamp
             if ts.tzinfo is None:
@@ -53,7 +71,14 @@ class BarStream:
             )
             if self._handler:
                 self._handler(bar)
+        return _on_bar
 
-        stream.subscribe_bars(_on_bar, *self._symbols)
+    def run(self) -> None:
+        if StockDataStream is None:
+            raise RuntimeError("alpaca-py is required: pip install alpaca-py")
+        self._client = StockDataStream(self._api_key, self._secret_key)
+        on_bar = self._make_on_bar()
+        if self._symbols:
+            self._client.subscribe_bars(on_bar, *self._symbols)
         logger.info("BarStream starting for %d symbols", len(self._symbols))
-        stream.run()
+        self._client.run()
