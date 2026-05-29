@@ -4,6 +4,7 @@ import os
 import threading
 import time
 from datetime import datetime, timezone
+from typing import Dict
 from zoneinfo import ZoneInfo
 
 _ET = ZoneInfo("America/New_York")
@@ -18,11 +19,12 @@ from bot.intraday.indicators.vwap import VWAPIndicator
 from bot.intraday.risk.kill_switch import KillSwitch
 from bot.intraday.risk.portfolio import PortfolioState
 from bot.intraday.risk.sizing import compute_position_size
-from bot.intraday.types import Bar, Position
+from bot.intraday.types import Bar, Position, TradeRecord
 from bot.momentum.validator import MomentumValidator
 from bot.positions.manager import ExitInstruction, PositionManager
 from bot.scanner.market_scanner import MarketScanner
 from bot.scanner.watchlist import Watchlist
+from bot.trade_logger import TradeLogger
 
 logging.basicConfig(level=logging.INFO,
                     format="%(asctime)s %(levelname)s %(name)s %(message)s")
@@ -68,6 +70,24 @@ def _update_trailing_stop(position: Position, new_stop: float) -> None:
             logger.warning("Trailing stop update failed for %s: %s", position.ticker, exc)
 
 
+def _close_record(
+    record: TradeRecord,
+    exit_time: datetime,
+    exit_price: float,
+    exit_reason: str,
+    trade_logger: TradeLogger,
+) -> None:
+    record.exit_time = exit_time
+    record.exit_price = exit_price
+    record.pnl = round((exit_price - record.entry_price) * record.shares, 2)
+    record.exit_reason = exit_reason
+    trade_logger.log(record)
+    logger.info(
+        "TRADE CLOSED %s: pnl=%.2f reason=%s",
+        record.ticker, record.pnl, exit_reason,
+    )
+
+
 def main() -> None:
     load_dotenv()
     api_key = os.environ["APCA_API_KEY_ID"]
@@ -84,12 +104,16 @@ def main() -> None:
     vwap_indicator = VWAPIndicator()
     validator = MomentumValidator(config)
     manager = PositionManager(config)
+    trade_logger = TradeLogger(log_dir="logs")
 
     stream = BarStream(api_key, secret_key, symbols=[])
     watchlist = Watchlist(stream, config)
     scanner = MarketScanner(api_key, secret_key, config, watchlist, base_url=base_url)
 
     eod_hour, eod_minute = (int(x) for x in config.eod_evaluation.split(":"))
+
+    # Open trade records keyed by ticker, completed and flushed to CSV on exit
+    open_records: Dict[str, TradeRecord] = {}
 
     def on_bar(bar: Bar) -> None:
         now = datetime.now(timezone.utc)
@@ -112,16 +136,22 @@ def main() -> None:
                         manager.should_hold_overnight(bar, position, vwap_val, baseline)):
                     _execute_exit(ExitInstruction(reason="eod", action="market_exit"), position)
                     portfolio.remove_position(bar.symbol)
+                    record = open_records.pop(bar.symbol, None)
+                    if record:
+                        _close_record(record, now, bar.close, "eod", trade_logger)
                 return
 
             if vwap_val and baseline:
                 old_stop = position.stop_price
                 instruction = manager.on_bar(bar, position, vwap_val, baseline)
                 if instruction:
+                    exit_price = instruction.limit_price if instruction.limit_price else bar.close
                     _execute_exit(instruction, position)
                     portfolio.remove_position(bar.symbol)
+                    record = open_records.pop(bar.symbol, None)
+                    if record:
+                        _close_record(record, now, exit_price, instruction.reason, trade_logger)
                 elif position.stop_price > old_stop:
-                    # Trailing stop moved up — update broker order
                     _update_trailing_stop(position, position.stop_price)
             return
 
@@ -171,6 +201,22 @@ def main() -> None:
                 entry_bar_volume=bar.volume,
             )
             portfolio.add_position(position)
+
+            open_records[bar.symbol] = TradeRecord(
+                ticker=bar.symbol,
+                direction="long",
+                entry_time=now,
+                entry_price=fill_price,
+                shares=size.shares,
+                stop_price=stop_price,
+                target_price=target_price,
+                signals=["momentum"],
+                sector="Unknown",
+                regime="",
+                portfolio_heat_at_entry=portfolio.portfolio_heat_pct,
+                expected_slippage_pct=config.expected_entry_slippage_pct,
+            )
+
             logger.info("ENTRY %s: %d shares @ %.2f, stop=%.2f, target=%.2f",
                         bar.symbol, size.shares, fill_price, stop_price, target_price)
         except Exception as exc:
