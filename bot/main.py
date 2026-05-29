@@ -4,6 +4,9 @@ import os
 import threading
 import time
 from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
+
+_ET = ZoneInfo("America/New_York")
 
 from dotenv import load_dotenv
 
@@ -89,6 +92,7 @@ def main() -> None:
 
     def on_bar(bar: Bar) -> None:
         now = datetime.now(timezone.utc)
+        now_et = now.astimezone(_ET)
         kill_switch.check(portfolio, now)
         if portfolio.kill_switch_active:
             return
@@ -101,8 +105,8 @@ def main() -> None:
         if bar.symbol in portfolio.positions:
             position = portfolio.positions[bar.symbol]
 
-            # Overnight hold evaluation at eod_evaluation time (ET clock = UTC-4 in summer)
-            if now.hour == eod_hour and now.minute == eod_minute:
+            # Overnight hold evaluation at eod_evaluation time (ET)
+            if now_et.hour == eod_hour and now_et.minute == eod_minute:
                 if not (vwap_val and baseline and
                         manager.should_hold_overnight(bar, position, vwap_val, baseline)):
                     _execute_exit(ExitInstruction(reason="eod", action="market_exit"), position)
