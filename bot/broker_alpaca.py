@@ -13,7 +13,7 @@ from alpaca.trading.requests import MarketOrderRequest, LimitOrderRequest, StopO
 from alpaca.trading.enums import OrderSide, TimeInForce
 
 # Search from this file upward so the .env is found regardless of cwd
-load_dotenv(Path(__file__).resolve().parent.parent / ".env")
+load_dotenv(Path(__file__).resolve().parent.parent / ".env", override=True)
 
 API_KEY = os.getenv("APCA_API_KEY_ID")
 API_SECRET = os.getenv("APCA_API_SECRET_KEY")
