@@ -44,10 +44,15 @@ class Position:
     signals: List[str]
     sector: str
     open_risk: float = 0.0
+    highest_close: float = 0.0       # tracks highest close since entry for trailing stop
+    stop_order_id: str = ""          # Alpaca order ID of the broker-level hard stop
+    entry_bar_volume: int = 0        # volume at entry bar, for volume collapse detection
 
     def __post_init__(self) -> None:
         if self.open_risk == 0.0:
             self.open_risk = self.shares * abs(self.entry_price - self.stop_price)
+        if self.highest_close == 0.0:
+            self.highest_close = self.entry_price
 
 
 @dataclass
