@@ -1,5 +1,6 @@
 from __future__ import annotations
 import logging
+import re
 import time
 from datetime import date
 from typing import TYPE_CHECKING, List, Optional
@@ -16,6 +17,7 @@ logger = logging.getLogger(__name__)
 _SNAPSHOTS_URL = "https://data.alpaca.markets/v2/stocks/snapshots"
 _BATCH_SIZE = 1000
 _EXCHANGE_ALLOWLIST = {"NYSE", "NASDAQ", "AMEX"}
+_COMMON_STOCK_RE = re.compile(r"^[A-Z]{1,5}$")  # excludes warrants (.WS), rights (.R), units (.U)
 
 
 class MarketScanner:
@@ -78,6 +80,7 @@ class MarketScanner:
         symbols = [
             a["symbol"] for a in resp.json()
             if a.get("exchange") in _EXCHANGE_ALLOWLIST
+            and _COMMON_STOCK_RE.match(a["symbol"])
         ]
         logger.info("Universe loaded: %d symbols", len(symbols))
         return symbols

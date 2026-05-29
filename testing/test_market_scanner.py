@@ -15,10 +15,12 @@ SNAPSHOT_RESPONSE = {
 }
 
 ASSETS_RESPONSE = [
-    {"symbol": "ASTC", "exchange": "NASDAQ", "status": "active", "tradable": True},
-    {"symbol": "SNDL", "exchange": "NASDAQ", "status": "active", "tradable": True},
-    {"symbol": "GME",  "exchange": "NYSE",   "status": "active", "tradable": True},
-    {"symbol": "OTC1", "exchange": "OTC",    "status": "active", "tradable": True},
+    {"symbol": "ASTC",    "exchange": "NASDAQ", "status": "active", "tradable": True},
+    {"symbol": "SNDL",    "exchange": "NASDAQ", "status": "active", "tradable": True},
+    {"symbol": "GME",     "exchange": "NYSE",   "status": "active", "tradable": True},
+    {"symbol": "OTC1",    "exchange": "OTC",    "status": "active", "tradable": True},
+    {"symbol": "JOBY.WS", "exchange": "NYSE",   "status": "active", "tradable": True},  # warrant
+    {"symbol": "XYZ.R",   "exchange": "NASDAQ", "status": "active", "tradable": True},  # right
 ]
 
 
@@ -58,7 +60,7 @@ def test_stage1_filter_requires_min_price():
     assert "GME" not in added
 
 
-def test_universe_filters_out_otc_stocks():
+def test_universe_filters_out_non_common_stock():
     scanner, watchlist = _make_scanner(prepopulate_universe=False)
     with patch("bot.scanner.market_scanner.requests.get") as mock_get:
         mock_get.return_value = MagicMock(
@@ -66,8 +68,10 @@ def test_universe_filters_out_otc_stocks():
             raise_for_status=lambda: None,
         )
         universe = scanner._load_universe()
-    assert "OTC1" not in universe
     assert "ASTC" in universe
+    assert "OTC1" not in universe    # wrong exchange
+    assert "JOBY.WS" not in universe  # warrant
+    assert "XYZ.R" not in universe    # right
 
 
 def test_universe_refreshes_when_date_changes():
