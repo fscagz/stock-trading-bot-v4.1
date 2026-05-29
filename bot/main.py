@@ -73,6 +73,7 @@ def main() -> None:
     api_key = os.environ["APCA_API_KEY_ID"]
     secret_key = os.environ["APCA_API_SECRET_KEY"]
 
+    base_url = os.getenv("APCA_API_BASE_URL", "https://paper-api.alpaca.markets")
     config = V4Config()
     account = broker.get_account_info()
     equity = account["portfolio_value"]
@@ -86,7 +87,7 @@ def main() -> None:
 
     stream = BarStream(api_key, secret_key, symbols=[])
     watchlist = Watchlist(stream, config)
-    scanner = MarketScanner(api_key, secret_key, config, watchlist)
+    scanner = MarketScanner(api_key, secret_key, config, watchlist, base_url=base_url)
 
     eod_hour, eod_minute = (int(x) for x in config.eod_evaluation.split(":"))
 

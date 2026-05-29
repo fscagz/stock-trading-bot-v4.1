@@ -14,9 +14,10 @@ from alpaca.trading.enums import OrderSide, TimeInForce
 load_dotenv()
 API_KEY = os.getenv("APCA_API_KEY_ID")
 API_SECRET = os.getenv("APCA_API_SECRET_KEY")
-BASE_URL = "https://paper-api.alpaca.markets"
+BASE_URL = os.getenv("APCA_API_BASE_URL", "https://paper-api.alpaca.markets")
 
-trading_client = TradingClient(API_KEY, API_SECRET, paper=True)
+_is_paper = "paper-api" in BASE_URL
+trading_client = TradingClient(API_KEY, API_SECRET, paper=_is_paper)
 
 def get_account_info():
     '''

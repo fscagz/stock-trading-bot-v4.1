@@ -13,7 +13,6 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-_ASSETS_URL = "https://paper-api.alpaca.markets/v2/assets"
 _SNAPSHOTS_URL = "https://data.alpaca.markets/v2/stocks/snapshots"
 _BATCH_SIZE = 1000
 _EXCHANGE_ALLOWLIST = {"NYSE", "NASDAQ", "AMEX"}
@@ -27,11 +26,19 @@ class MarketScanner:
     1000 symbols every scanner_interval_seconds and filtered by Stage 1 criteria.
     """
 
-    def __init__(self, api_key: str, secret_key: str, config: V4Config, watchlist: Watchlist) -> None:
+    def __init__(
+        self,
+        api_key: str,
+        secret_key: str,
+        config: V4Config,
+        watchlist: Watchlist,
+        base_url: str = "https://paper-api.alpaca.markets",
+    ) -> None:
         self._headers = {
             "APCA-API-KEY-ID": api_key,
             "APCA-API-SECRET-KEY": secret_key,
         }
+        self._assets_url = f"{base_url.rstrip('/')}/v2/assets"
         self._cfg = config
         self._watchlist = watchlist
         self._universe: List[str] = []
@@ -62,7 +69,7 @@ class MarketScanner:
 
     def _load_universe(self) -> List[str]:
         resp = requests.get(
-            _ASSETS_URL,
+            self._assets_url,
             headers=self._headers,
             params={"status": "active", "asset_class": "us_equity", "tradable": "true"},
             timeout=30,
