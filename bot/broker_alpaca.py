@@ -6,15 +6,25 @@
 '''
 
 import os
+from pathlib import Path
 from dotenv import load_dotenv
 from alpaca.trading.client import TradingClient
 from alpaca.trading.requests import MarketOrderRequest, LimitOrderRequest, StopOrderRequest
 from alpaca.trading.enums import OrderSide, TimeInForce
 
-load_dotenv()
+# Search from this file upward so the .env is found regardless of cwd
+load_dotenv(Path(__file__).resolve().parent.parent / ".env")
+
 API_KEY = os.getenv("APCA_API_KEY_ID")
 API_SECRET = os.getenv("APCA_API_SECRET_KEY")
 BASE_URL = os.getenv("APCA_API_BASE_URL", "https://paper-api.alpaca.markets")
+
+if not API_KEY or not API_SECRET:
+    raise RuntimeError(
+        "Alpaca credentials missing. "
+        "Ensure APCA_API_KEY_ID and APCA_API_SECRET_KEY are set in "
+        f"{Path(__file__).resolve().parent.parent / '.env'}"
+    )
 
 _is_paper = "paper-api" in BASE_URL
 trading_client = TradingClient(API_KEY, API_SECRET, paper=_is_paper)
