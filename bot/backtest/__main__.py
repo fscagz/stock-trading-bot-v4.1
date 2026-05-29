@@ -104,8 +104,12 @@ def main() -> None:
     else:
         if not args.end:
             parser.error("--start requires --end")
-        days = _trading_days(date.fromisoformat(args.start), date.fromisoformat(args.end))
+        start_date = date.fromisoformat(args.start)
+        end_date = date.fromisoformat(args.end)
+        days = _trading_days(start_date, end_date)
         prefix = f"{args.start}_{args.end}"
+        # Pre-fetch daily bars for the full range once instead of once per day
+        screener.preload(start_date, end_date)
 
     all_trades: List[TradeRecord] = []
 
