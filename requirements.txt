@@ -1,0 +1,11 @@
+# Core
+alpaca-py
+requests
+python-dotenv
+numpy
+pandas
+pytz
+yfinance
+
+# Testing
+pytest
