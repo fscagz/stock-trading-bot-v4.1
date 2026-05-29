@@ -8,7 +8,7 @@
 import os
 # from dotenv import load_dotenv # Might not be needed depending on Python installation
 from alpaca.trading.client import TradingClient
-from alpaca.trading.requests import MarketOrderRequest
+from alpaca.trading.requests import MarketOrderRequest, LimitOrderRequest, StopOrderRequest
 from alpaca.trading.enums import OrderSide, TimeInForce
 
 # load_dotenv()
@@ -64,3 +64,35 @@ def submit_market_order(symbol, qty, side = "buy"):
     )
     result = trading_client.submit_order(order)
     return result.id
+
+
+def submit_limit_order(symbol: str, qty: int, side: str, limit_price: float) -> str:
+    order = LimitOrderRequest(
+        symbol=symbol,
+        qty=qty,
+        side=OrderSide.BUY if side == "buy" else OrderSide.SELL,
+        time_in_force=TimeInForce.DAY,
+        limit_price=round(limit_price, 2),
+    )
+    result = trading_client.submit_order(order)
+    return result.id
+
+
+def submit_stop_order(symbol: str, qty: int, stop_price: float) -> str:
+    order = StopOrderRequest(
+        symbol=symbol,
+        qty=qty,
+        side=OrderSide.SELL,
+        time_in_force=TimeInForce.DAY,
+        stop_price=round(stop_price, 2),
+    )
+    result = trading_client.submit_order(order)
+    return result.id
+
+
+def cancel_order(order_id: str) -> None:
+    trading_client.cancel_order_by_id(order_id)
+
+
+def get_order(order_id: str):
+    return trading_client.get_order_by_id(order_id)
