@@ -25,6 +25,8 @@ from bot.positions.manager import ExitInstruction, PositionManager
 from bot.scanner.market_scanner import MarketScanner
 from bot.scanner.watchlist import Watchlist
 from bot.trade_logger import TradeLogger
+from bot.dashboard.server import start_server
+from bot.dashboard.state import DashboardState
 
 logging.basicConfig(level=logging.INFO,
                     format="%(asctime)s %(levelname)s %(name)s %(message)s")
@@ -88,6 +90,15 @@ def _close_record(
     )
 
 
+def _sync_portfolio(dash: DashboardState, portfolio: PortfolioState) -> None:
+    with dash._lock:
+        dash.positions = dict(portfolio.positions)
+        dash.portfolio_heat_pct = portfolio.portfolio_heat_pct
+        dash.kill_switch_active = portfolio.kill_switch_active
+        dash.consecutive_losses = portfolio.consecutive_losses
+        dash.cooldown_until = portfolio.cooldown_until
+
+
 def main() -> None:
     load_dotenv()
     api_key = os.environ["APCA_API_KEY_ID"]
@@ -97,6 +108,27 @@ def main() -> None:
     config = V4Config()
     account = broker.get_account_info()
     equity = account["portfolio_value"]
+
+    dash = DashboardState()
+    dash.equity = equity
+    dash.cash = account["cash"]
+    dash.buying_power = account["buying_power"]
+    dash.is_paper = broker._is_paper
+    dash.config_snapshot = {
+        "risk_per_trade": config.risk_per_trade,
+        "max_portfolio_heat": config.max_portfolio_heat,
+        "max_open_positions": config.max_open_positions,
+        "stage2_min_relative_volume": config.stage2_min_relative_volume,
+        "stage1_min_price_change_pct": config.stage1_min_price_change_pct,
+        "stage2_buying_pressure_min": config.stage2_buying_pressure_min,
+        "eod_evaluation": config.eod_evaluation,
+        "confidence_tiers": (
+            f"{config.confidence_tier1_multiplier:.0f}×"
+            f"/{config.confidence_tier2_multiplier:.0f}×"
+            f"/{config.confidence_tier3_multiplier:.0f}×"
+            f"/{config.confidence_tier4_multiplier:.0f}×"
+        ),
+    }
 
     portfolio = PortfolioState(equity=equity, config=config)
     kill_switch = KillSwitch(config)
@@ -119,6 +151,11 @@ def main() -> None:
         now = datetime.now(timezone.utc)
         now_et = now.astimezone(_ET)
         kill_switch.check(portfolio, now)
+        with dash._lock:
+            dash.last_prices[bar.symbol] = bar.close
+            dash.kill_switch_active = portfolio.kill_switch_active
+            dash.consecutive_losses = portfolio.consecutive_losses
+            dash.cooldown_until = portfolio.cooldown_until
         if portfolio.kill_switch_active:
             return
 
@@ -139,6 +176,9 @@ def main() -> None:
                     record = open_records.pop(bar.symbol, None)
                     if record:
                         _close_record(record, now, bar.close, "eod", trade_logger)
+                        with dash._lock:
+                            dash.closed_trades.append(record)
+                _sync_portfolio(dash, portfolio)
                 return
 
             if vwap_val and baseline:
@@ -151,6 +191,9 @@ def main() -> None:
                     record = open_records.pop(bar.symbol, None)
                     if record:
                         _close_record(record, now, exit_price, instruction.reason, trade_logger)
+                        with dash._lock:
+                            dash.closed_trades.append(record)
+                    _sync_portfolio(dash, portfolio)
                 elif position.stop_price > old_stop:
                     _update_trailing_stop(position, position.stop_price)
             return
@@ -201,6 +244,7 @@ def main() -> None:
                 entry_bar_volume=bar.volume,
             )
             portfolio.add_position(position)
+            _sync_portfolio(dash, portfolio)
 
             open_records[bar.symbol] = TradeRecord(
                 ticker=bar.symbol,
@@ -226,6 +270,7 @@ def main() -> None:
 
     scanner_thread = threading.Thread(target=scanner.run, daemon=True)
     scanner_thread.start()
+    start_server(dash)
     logger.info("V4 Momentum Bot started. Equity: $%.2f", equity)
 
     stream.run()
