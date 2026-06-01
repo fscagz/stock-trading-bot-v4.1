@@ -1,6 +1,7 @@
 from __future__ import annotations
 import json
 import logging
+import time
 from datetime import date, datetime
 from pathlib import Path
 from typing import List, Optional
@@ -54,7 +55,7 @@ class BarFetcher:
         }
         params: dict = {
             "timeframe": "1Min",
-            "feed": "iex",
+            "feed": "sip",
             "start": start.isoformat(),
             "end": end.isoformat(),
             "limit": 1000,
@@ -62,12 +63,27 @@ class BarFetcher:
 
         all_bars: List[Bar] = []
         while True:
-            try:
-                resp = requests.get(url, headers=headers, params=params, timeout=30)
-                resp.raise_for_status()
-                data = resp.json()
-            except Exception as exc:
-                logger.warning("BarFetcher: API error for %s %s: %s", symbol, trade_date, exc)
+            for attempt in range(8):
+                try:
+                    resp = requests.get(url, headers=headers, params=params, timeout=30)
+                    if resp.status_code == 429:
+                        wait = int(resp.headers.get("Retry-After", 60)) if attempt == 0 else 60 * (2 ** attempt)
+                        logger.warning("BarFetcher: rate limited for %s %s — waiting %ds (attempt %d/8)",
+                                       symbol, trade_date, wait, attempt + 1)
+                        time.sleep(wait)
+                        continue
+                    resp.raise_for_status()
+                    data = resp.json()
+                    break
+                except requests.exceptions.HTTPError as exc:
+                    logger.warning("BarFetcher: HTTP error for %s %s: %s", symbol, trade_date, exc)
+                    return None
+                except Exception as exc:
+                    wait = 10 * (2 ** attempt)
+                    logger.warning("BarFetcher: error for %s %s: %s — retry in %ds", symbol, trade_date, exc, wait)
+                    time.sleep(wait)
+            else:
+                logger.error("BarFetcher: exhausted retries for %s %s", symbol, trade_date)
                 return None
 
             for b in data.get("bars") or []:

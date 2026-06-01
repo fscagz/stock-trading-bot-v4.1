@@ -5,6 +5,7 @@ from datetime import date, datetime
 from typing import Dict, List, Optional, Tuple
 from zoneinfo import ZoneInfo
 
+from bot.backtest.news_filter import NewsFilter
 from bot.config import V4Config
 from bot.intraday.indicators.atr import ATRIndicator
 from bot.intraday.indicators.vwap import VWAPIndicator
@@ -16,7 +17,7 @@ from bot.positions.manager import PositionManager
 
 _ET = ZoneInfo("America/New_York")
 _EOD_HOUR = 15
-_EOD_MINUTE = 25
+_EOD_MINUTE = 55   # matches LiveRunner _EOD_FORCE_CLOSE = dtime(15, 55)
 logger = logging.getLogger(__name__)
 
 
@@ -32,10 +33,18 @@ class Simulator:
         config: V4Config,
         initial_equity: float,
         slippage_pct: float = 0.001,
+        overnight_holds: bool = True,
+        market_order_fill: bool = False,
+        news_filter: Optional[NewsFilter] = None,
+        news_mode: str = "ignore",
     ) -> None:
         self._config = config
         self._initial_equity = initial_equity
         self._slippage_pct = slippage_pct
+        self._overnight_holds = overnight_holds
+        self._market_order_fill = market_order_fill
+        self._news_filter = news_filter
+        self._news_mode = news_mode
 
     def run_day(
         self,
@@ -49,6 +58,17 @@ class Simulator:
         manager = PositionManager(self._config)
         portfolio = PortfolioState(equity=self._initial_equity, config=self._config)
 
+        # Apply news filter: pre-screen symbols before bar loop (avoids per-bar API calls)
+        if self._news_filter is not None and self._news_mode != "ignore":
+            filtered: Dict[str, List[Bar]] = {}
+            for sym, bars in bars_by_symbol.items():
+                has_cat = self._news_filter.has_catalyst(sym, trade_date)
+                if self._news_mode == "require" and has_cat:
+                    filtered[sym] = bars
+                elif self._news_mode == "exclude" and not has_cat:
+                    filtered[sym] = bars
+            bars_by_symbol = filtered
+
         merged: List[Bar] = sorted(
             (b for bars in bars_by_symbol.values() for b in bars),
             key=lambda b: b.timestamp,
@@ -57,6 +77,7 @@ class Simulator:
         open_records: Dict[str, TradeRecord] = {}
         closed_trades: List[TradeRecord] = []
         pending_entries: Dict[str, dict] = {}  # symbol → {atr_val, size}
+        traded_today: set = set()  # symbols that already had an entry today
         equity_curve: List[Tuple[datetime, float]] = []
 
         for bar in merged:
@@ -110,9 +131,14 @@ class Simulator:
 
             # EOD evaluation at 15:25 ET
             if bar_et.hour == _EOD_HOUR and bar_et.minute == _EOD_MINUTE:
-                if sym in portfolio.positions and vwap_val is not None and baseline > 0:
-                    position = portfolio.positions[sym]
-                    if not manager.should_hold_overnight(bar, position, vwap_val, baseline):
+                if sym in portfolio.positions:
+                    should_hold = (
+                        self._overnight_holds
+                        and vwap_val is not None
+                        and baseline > 0
+                        and manager.should_hold_overnight(bar, portfolio.positions[sym], vwap_val, baseline)
+                    )
+                    if not should_hold:
                         self._close(sym, bar.close, "eod", bar.timestamp,
                                     portfolio, open_records, closed_trades)
                 equity_curve.append((bar.timestamp, portfolio.equity))
@@ -142,6 +168,8 @@ class Simulator:
             # Entry logic
             if sym in pending_entries:
                 continue
+            if sym in traded_today:
+                continue
             if not (atr_val and baseline > 0):
                 continue
             can_enter, _ = portfolio.can_enter(sector="Unknown", now=bar.timestamp)
@@ -150,8 +178,42 @@ class Simulator:
             if validator.validate(bar, baseline):
                 size = compute_position_size(portfolio.equity, atr_val, bar.close, self._config)
                 if size.shares > 0:
-                    pending_entries[sym] = {"atr_val": atr_val, "size": size}
-                    logger.debug("BT SIGNAL %s @ %s", sym, bar.timestamp)
+                    mult = self._config.confidence_multiplier(
+                        validator.confidence_score(bar, baseline)
+                    )
+                    if mult > 1.0:
+                        max_shares = int(portfolio.equity * self._config.max_position_pct / bar.close)
+                        size.shares = min(int(size.shares * mult), max(0, max_shares))
+                    if self._market_order_fill:
+                        # Market order: fill immediately at signal bar's close, no slippage.
+                        # Matches live runner behaviour (market order submitted at bar close).
+                        fill_price = bar.close
+                        stop_price = size.long_stop(fill_price)
+                        target_price = size.long_target(fill_price)
+                        position = Position(
+                            ticker=sym, direction="long", shares=size.shares,
+                            entry_price=fill_price, stop_price=stop_price,
+                            target_price=target_price, entry_time=bar.timestamp,
+                            atr_at_entry=atr_val, signals=["momentum"],
+                            sector="Unknown", highest_close=fill_price,
+                            entry_bar_volume=bar.volume,
+                        )
+                        portfolio.add_position(position)
+                        open_records[sym] = TradeRecord(
+                            ticker=sym, direction="long", entry_time=bar.timestamp,
+                            entry_price=fill_price, shares=size.shares,
+                            stop_price=stop_price, target_price=target_price,
+                            signals=["momentum"], sector="Unknown", regime="",
+                            portfolio_heat_at_entry=portfolio.portfolio_heat_pct,
+                            expected_slippage_pct=0.0,
+                        )
+                        traded_today.add(sym)
+                        logger.debug("BT ENTRY (market) %s @ %.2f shares=%d", sym, fill_price, size.shares)
+                        equity_curve.append((bar.timestamp, portfolio.equity))
+                    else:
+                        pending_entries[sym] = {"atr_val": atr_val, "size": size}
+                        traded_today.add(sym)
+                        logger.debug("BT SIGNAL %s @ %s", sym, bar.timestamp)
 
         return BacktestResult(trades=closed_trades, equity_curve=equity_curve)
 

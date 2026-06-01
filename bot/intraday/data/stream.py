@@ -1,5 +1,6 @@
 from __future__ import annotations
 import logging
+import threading
 from datetime import timezone
 from typing import Callable, List, Optional, Set
 
@@ -82,3 +83,40 @@ class BarStream:
             self._client.subscribe_bars(on_bar, *self._symbols)
         logger.info("BarStream starting for %d symbols", len(self._symbols))
         self._client.run()
+
+    def run_with_reconnect(
+        self,
+        stop_event: threading.Event,
+        max_retries: int = 20,
+    ) -> None:
+        """Block until stop_event is set, reconnecting on any websocket drop.
+
+        Back-off: 10s, 20s, 40s, 80s … capped at 5 minutes.
+        Gives up after max_retries *consecutive* failures (counter is not reset
+        between attempts — only resets if the stream exits cleanly).
+        """
+        if StockDataStream is None:
+            raise RuntimeError("alpaca-py is required: pip install alpaca-py")
+
+        attempt = 0
+        while not stop_event.is_set():
+            try:
+                self.run()
+                logger.info("BarStream closed gracefully")
+                return
+            except Exception as exc:
+                if stop_event.is_set():
+                    return
+                attempt += 1
+                if attempt > max_retries:
+                    logger.error(
+                        "BarStream: max reconnect attempts (%d) reached, giving up",
+                        max_retries,
+                    )
+                    return
+                delay = min(10 * 2 ** (attempt - 1), 300)
+                logger.warning(
+                    "BarStream disconnected (attempt %d/%d): %s — reconnecting in %.0fs",
+                    attempt, max_retries, exc, delay,
+                )
+                stop_event.wait(timeout=delay)

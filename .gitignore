@@ -12,3 +12,6 @@ build/
 *.log
 heartbeat.txt
 .superpowers/
+.DS_Store
+backtest_results/
+screener_cache/

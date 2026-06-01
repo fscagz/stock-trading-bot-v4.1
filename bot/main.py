@@ -12,7 +12,8 @@ _ET = ZoneInfo("America/New_York")
 from dotenv import load_dotenv
 
 import bot.broker_alpaca as broker
-from bot.config import V4Config
+from bot.backtest.news_filter import NewsFilter
+from bot.config import V4Config, make_long_config
 from bot.intraday.data.stream import BarStream
 from bot.intraday.indicators.atr import ATRIndicator
 from bot.intraday.indicators.vwap import VWAPIndicator
@@ -105,7 +106,7 @@ def main() -> None:
     secret_key = os.environ["APCA_API_SECRET_KEY"]
 
     base_url = os.getenv("APCA_API_BASE_URL", "https://paper-api.alpaca.markets")
-    config = V4Config()
+    config = make_long_config()
     account = broker.get_account_info()
     equity = account["portfolio_value"]
 
@@ -137,6 +138,7 @@ def main() -> None:
     validator = MomentumValidator(config)
     manager = PositionManager(config)
     trade_logger = TradeLogger(log_dir="logs")
+    news_filter = NewsFilter(api_key, secret_key, cache_only=False)
 
     stream = BarStream(api_key, secret_key, symbols=[])
     watchlist = Watchlist(stream, config)
@@ -146,6 +148,8 @@ def main() -> None:
 
     # Open trade records keyed by ticker, completed and flushed to CSV on exit
     open_records: Dict[str, TradeRecord] = {}
+    # Symbols that have already had an entry today — no same-day re-entry
+    traded_today: set = set()
 
     def on_bar(bar: Bar) -> None:
         now = datetime.now(timezone.utc)
@@ -201,7 +205,12 @@ def main() -> None:
         # --- Entry logic for watchlist candidates ---
         if bar.symbol not in watchlist.symbols:
             return
+        if bar.symbol in traded_today:
+            return
         if not (atr_val and baseline):
+            return
+        if not news_filter.has_catalyst(bar.symbol, now_et.date()):
+            logger.debug("No catalyst for %s — skipping entry", bar.symbol)
             return
         if not validator.validate(bar, baseline):
             return
@@ -212,6 +221,13 @@ def main() -> None:
             return
 
         size = compute_position_size(portfolio.equity, atr_val, bar.close, config)
+        if size.shares <= 0:
+            return
+
+        mult = config.confidence_multiplier(validator.confidence_score(bar, baseline))
+        if mult > 1.0:
+            max_shares = int(portfolio.equity * config.max_position_pct / bar.close)
+            size.shares = min(int(size.shares * mult), max(0, max_shares))
         if size.shares <= 0:
             return
 
@@ -244,6 +260,7 @@ def main() -> None:
                 entry_bar_volume=bar.volume,
             )
             portfolio.add_position(position)
+            traded_today.add(bar.symbol)
             _sync_portfolio(dash, portfolio)
 
             open_records[bar.symbol] = TradeRecord(

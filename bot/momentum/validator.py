@@ -50,6 +50,33 @@ class MomentumValidator:
             return False
         return bar.volume >= baseline_volume_per_min * self._cfg.stage2_min_relative_volume
 
+    def confidence_score(self, bar: Bar, baseline_volume_per_min: float) -> float:
+        """Return 0–1 score based on how strongly each signal exceeds its minimum.
+
+        Only meaningful after validate() returns True. Used by the live bot and
+        backtest to scale position size via confidence tiers (1×/2×/4×/8×).
+        """
+        history = list(self._history.get(bar.symbol, []))
+        lookback = self._cfg.stage2_roc_lookback_bars
+        if len(history) < lookback + 1 or baseline_volume_per_min <= 0:
+            return 0.5
+
+        past_close = history[-(lookback + 1)].close
+        roc = (bar.close - past_close) / past_close if past_close > 0 else 0
+        roc_min = self._cfg.stage2_roc_min_pct
+        roc_score = min(1.0, max(0.0, (roc - roc_min) / (3 * roc_min))) if roc_min > 0 else 0.5
+
+        rel_vol = bar.volume / baseline_volume_per_min
+        vol_min = self._cfg.stage2_min_relative_volume
+        vol_score = min(1.0, max(0.0, (rel_vol - vol_min) / (3 * vol_min))) if vol_min > 0 else 0.5
+
+        bar_range = bar.high - bar.low
+        close_pos = (bar.close - bar.low) / bar_range if bar_range > 0 else 0.5
+        p_min = self._cfg.stage2_buying_pressure_min
+        pressure_score = min(1.0, max(0.0, (close_pos - p_min) / max(1.0 - p_min, 1e-9)))
+
+        return (roc_score + vol_score + pressure_score) / 3
+
     def _check_buying_pressure(self, bar: Bar) -> bool:
         bar_range = bar.high - bar.low
         if bar_range <= 0:

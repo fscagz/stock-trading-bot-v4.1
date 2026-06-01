@@ -1,16 +1,23 @@
 # broker_alpaca.py
-'''
- Initializes Alpaca TradingClient using API credentials.
- Input: None (reads from environment variables or hardcoded BASE_URL)
- Output: trading_client object for submitting orders and retrieving account data
-'''
-
+import logging
 import os
+import threading
+import time
 from pathlib import Path
+from typing import Optional
+
+import requests as _req
 from dotenv import load_dotenv
 from alpaca.trading.client import TradingClient
-from alpaca.trading.requests import MarketOrderRequest, LimitOrderRequest, StopOrderRequest
-from alpaca.trading.enums import OrderSide, TimeInForce
+from alpaca.trading.requests import (
+    GetAssetsRequest,
+    LimitOrderRequest,
+    MarketOrderRequest,
+    StopOrderRequest,
+)
+from alpaca.trading.enums import AssetClass, OrderSide, TimeInForce
+
+logger = logging.getLogger(__name__)
 
 # Search from this file upward so the .env is found regardless of cwd
 load_dotenv(Path(__file__).resolve().parent.parent / ".env", override=True)
@@ -29,44 +36,58 @@ if not API_KEY or not API_SECRET:
 _is_paper = "paper-api" in BASE_URL
 trading_client = TradingClient(API_KEY, API_SECRET, paper=_is_paper)
 
-def get_account_info():
-    '''
- Retrieves account information such as cash, buying power, portfolio value, and account status.
- Input: None
- Output: Dictionary with account metrics (cash, buying_power, portfolio_value, status)
-    '''
+# Rate-limit guard for get_movers (Alpaca enforces ~1 req/15s on this endpoint)
+_movers_lock = threading.Lock()
+_last_movers_call: float = 0.0
+_MOVERS_MIN_INTERVAL = 15.0
+
+
+# ------------------------------------------------------------------
+# Account
+# ------------------------------------------------------------------
+
+def get_account_info() -> dict:
     account = trading_client.get_account()
     return {
         "cash": float(account.cash),
         "buying_power": float(account.buying_power),
         "portfolio_value": float(account.portfolio_value),
-        "status": account.status
+        "status": account.status,
     }
 
-def get_open_positions():
-    '''
- Fetches all currently open positions in the Alpaca account.
- Input: None
- Output: Dictionary mapping ticker symbols to position quantities (as floats)
-    '''
+
+def get_open_positions() -> dict:
     positions = trading_client.get_all_positions()
     return {p.symbol: float(p.qty) for p in positions}
 
-def submit_market_order(symbol, qty, side = "buy"):
-    '''
- Submits a market order to buy or sell a specified quantity of a stock.
- Input:
-   - symbol (str): Ticker symbol of the stock
-   - qty (int or float): Quantity of shares to trade
-   - side (str): "buy" or "sell" (default is "buy")
- Output:
-   - str: Order ID of the submitted market order
-    '''
+
+def get_all_positions_detail() -> dict:
+    """Return open positions with full detail needed for reconciliation.
+
+    Returns:
+        {symbol: {"qty": int, "entry_price": float, "side": "long"|"short"}}
+    """
+    positions = trading_client.get_all_positions()
+    result = {}
+    for p in positions:
+        result[p.symbol] = {
+            "qty": abs(int(float(p.qty))),
+            "entry_price": float(p.avg_entry_price),
+            "side": p.side.value if hasattr(p.side, "value") else str(p.side),
+        }
+    return result
+
+
+# ------------------------------------------------------------------
+# Orders
+# ------------------------------------------------------------------
+
+def submit_market_order(symbol: str, qty: int, side: str = "buy") -> str:
     order = MarketOrderRequest(
-        symbol = symbol,
-        qty = qty,
-        side = OrderSide.BUY if side == "buy" else OrderSide.SELL,
-        time_in_force = TimeInForce.DAY
+        symbol=symbol,
+        qty=qty,
+        side=OrderSide.BUY if side == "buy" else OrderSide.SELL,
+        time_in_force=TimeInForce.DAY,
     )
     result = trading_client.submit_order(order)
     return result.id
@@ -85,6 +106,7 @@ def submit_limit_order(symbol: str, qty: int, side: str, limit_price: float) -> 
 
 
 def submit_stop_order(symbol: str, qty: int, stop_price: float) -> str:
+    """Stop sell order — protects a long position."""
     order = StopOrderRequest(
         symbol=symbol,
         qty=qty,
@@ -96,9 +118,138 @@ def submit_stop_order(symbol: str, qty: int, stop_price: float) -> str:
     return result.id
 
 
+def submit_stop_buy_order(symbol: str, qty: int, stop_price: float) -> str:
+    """Stop buy order — protects a short position (buy-to-cover if price rises to stop)."""
+    order = StopOrderRequest(
+        symbol=symbol,
+        qty=qty,
+        side=OrderSide.BUY,
+        time_in_force=TimeInForce.DAY,
+        stop_price=round(stop_price, 2),
+    )
+    result = trading_client.submit_order(order)
+    return result.id
+
+
+def short_sell(symbol: str, qty: int) -> str:
+    """Market sell to open a short position."""
+    order = MarketOrderRequest(
+        symbol=symbol,
+        qty=qty,
+        side=OrderSide.SELL,
+        time_in_force=TimeInForce.DAY,
+    )
+    result = trading_client.submit_order(order)
+    return result.id
+
+
+def buy_to_cover(symbol: str, qty: int) -> str:
+    """Market buy to close a short position."""
+    order = MarketOrderRequest(
+        symbol=symbol,
+        qty=qty,
+        side=OrderSide.BUY,
+        time_in_force=TimeInForce.DAY,
+    )
+    result = trading_client.submit_order(order)
+    return result.id
+
+
+def buy(symbol: str, qty: int) -> str:
+    """Market buy to open a long position."""
+    order = MarketOrderRequest(
+        symbol=symbol,
+        qty=qty,
+        side=OrderSide.BUY,
+        time_in_force=TimeInForce.DAY,
+    )
+    result = trading_client.submit_order(order)
+    return result.id
+
+
+def sell(symbol: str, qty: int) -> str:
+    """Market sell to close a long position."""
+    order = MarketOrderRequest(
+        symbol=symbol,
+        qty=qty,
+        side=OrderSide.SELL,
+        time_in_force=TimeInForce.DAY,
+    )
+    result = trading_client.submit_order(order)
+    return result.id
+
+
 def cancel_order(order_id: str) -> None:
     trading_client.cancel_order_by_id(order_id)
 
 
 def get_order(order_id: str):
     return trading_client.get_order_by_id(order_id)
+
+
+def is_order_filled(order_id: str) -> bool:
+    try:
+        order = trading_client.get_order_by_id(order_id)
+        return "filled" in str(order.status).lower()
+    except Exception:
+        return False
+
+
+def get_fill_price(order_id: str, max_wait_sec: float = 2.0) -> Optional[float]:
+    """Poll until a market order fills and return the filled average price.
+
+    Returns None if the order hasn't filled within max_wait_sec.
+    Market orders on liquid stocks typically fill in milliseconds.
+    """
+    deadline = time.monotonic() + max_wait_sec
+    while time.monotonic() < deadline:
+        try:
+            order = trading_client.get_order_by_id(order_id)
+            if "filled" in str(order.status).lower() and order.filled_avg_price is not None:
+                return float(order.filled_avg_price)
+        except Exception:
+            pass
+        time.sleep(0.1)
+    return None
+
+
+# ------------------------------------------------------------------
+# Universe / screener
+# ------------------------------------------------------------------
+
+def get_etb_set() -> set:
+    """Return the set of symbols currently easy-to-borrow for short selling."""
+    try:
+        assets = trading_client.get_all_assets(
+            GetAssetsRequest(asset_class=AssetClass.US_EQUITY, easy_to_borrow=True)
+        )
+        etb = {a.symbol for a in assets if a.tradable and a.shortable}
+        logger.info("ETB list loaded: %d symbols", len(etb))
+        return etb
+    except Exception as exc:
+        logger.error("Failed to fetch ETB list: %s", exc)
+        return set()
+
+
+def get_movers(top_n: int = 200) -> list:
+    """Return top gainers from Alpaca's screener endpoint.
+
+    Thread-safe rate-limited to _MOVERS_MIN_INTERVAL seconds between calls.
+    Each item: {"symbol": str, "percent_change": float, "price": float, "change": float}
+    """
+    global _last_movers_call
+
+    with _movers_lock:
+        elapsed = time.monotonic() - _last_movers_call
+        if elapsed < _MOVERS_MIN_INTERVAL:
+            time.sleep(_MOVERS_MIN_INTERVAL - elapsed)
+        _last_movers_call = time.monotonic()
+
+    resp = _req.get(
+        "https://data.alpaca.markets/v1beta1/screener/stocks/movers",
+        headers={"APCA-API-KEY-ID": API_KEY, "APCA-API-SECRET-KEY": API_SECRET},
+        params={"top": top_n},
+        timeout=10,
+    )
+    resp.raise_for_status()
+    return resp.json().get("gainers", [])
