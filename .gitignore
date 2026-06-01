@@ -11,3 +11,4 @@ build/
 *.csv
 *.log
 heartbeat.txt
+.superpowers/
