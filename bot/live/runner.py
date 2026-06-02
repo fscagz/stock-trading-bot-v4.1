@@ -88,6 +88,9 @@ class LiveRunner:
 
     def __init__(
         self,
+        ibkr_host: str,
+        ibkr_port: int,
+        ibkr_client_id: int,
         api_key: str,
         secret_key: str,
         short_config: V4Config,
@@ -109,6 +112,9 @@ class LiveRunner:
                 long_config.risk_per_trade, long_config.max_portfolio_heat,
             )
 
+        self._ibkr_host = ibkr_host
+        self._ibkr_port = ibkr_port
+        self._ibkr_client_id = ibkr_client_id
         self._short_cfg = short_config
         self._long_cfg = long_config
         self._etb_set = etb_set
@@ -855,7 +861,7 @@ class LiveRunner:
             len(all_initial), len(reconciled_syms), len(initial_watchlist),
         )
 
-        self._stream = BarStream(self._api_key, self._secret_key, list(all_initial))
+        self._stream = BarStream(self._ibkr_host, self._ibkr_port, self._ibkr_client_id, list(all_initial))
         self._stream.set_handler(self._on_bar)
 
         for name, target in [

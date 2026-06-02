@@ -34,6 +34,10 @@ def main() -> None:
     api_key = os.environ["APCA_API_KEY_ID"]
     secret_key = os.environ["APCA_API_SECRET_KEY"]
 
+    ibkr_host = os.getenv("IBKR_HOST", "127.0.0.1")
+    ibkr_port = int(os.getenv("IBKR_PORT", "4001"))
+    ibkr_client_id = int(os.getenv("IBKR_CLIENT_ID_STREAM", "1"))
+
     account = broker.get_account_info()
     equity = account["portfolio_value"]
     logger.info("Account equity: $%.2f | Status: %s", equity, account["status"])
@@ -42,6 +46,9 @@ def main() -> None:
     logger.info("ETB set: %d shortable symbols", len(etb_set))
 
     runner = LiveRunner(
+        ibkr_host=ibkr_host,
+        ibkr_port=ibkr_port,
+        ibkr_client_id=ibkr_client_id,
         api_key=api_key,
         secret_key=secret_key,
         short_config=V4Config(),
