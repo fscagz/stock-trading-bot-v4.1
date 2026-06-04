@@ -1,9 +1,9 @@
 from __future__ import annotations
 import logging
 import threading
+from datetime import datetime, timezone
 from typing import Callable, Dict, List, Optional, Set, Tuple
 
-from bot.intraday.data.aggregator import MinuteBarAggregator
 from bot.intraday.types import Bar
 
 logger = logging.getLogger(__name__)
@@ -19,12 +19,15 @@ except ImportError:
 
 _SMART = "SMART"
 _USD = "USD"
-_WHAT_TO_SHOW = "TRADES"
 
 
 class BarStream:
-    """Subscribes to IBKR real-time 5-second bars via IB Gateway and emits
-    aggregated 1-minute Bar objects to the registered handler.
+    """Subscribes to IBKR 1-minute bars via IB Gateway and emits completed
+    Bar objects to the registered handler.
+
+    Uses reqHistoricalData(keepUpToDate=True) which requires only the standard
+    exchange market data subscription (no separate streaming permission needed).
+    Each completed 1-minute bar is emitted when the next minute begins.
 
     Requires a locally running IB Gateway (port 4001 live, 4002 paper).
 
@@ -49,8 +52,7 @@ class BarStream:
         self._symbols: Set[str] = set(symbols)
         self._handler: Optional[BarHandler] = None
         self._ib: Optional[IB] = None
-        self._aggregator: Optional[MinuteBarAggregator] = None
-        # symbol -> (RealTimeBarList, callback) — kept so we can unsubscribe cleanly
+        # symbol -> (BarDataList, callback) — kept so we can unsubscribe cleanly
         self._bar_lists: Dict[str, Tuple] = {}
 
     @property
@@ -73,26 +75,52 @@ class BarStream:
             bar_list, cb = self._bar_lists.pop(symbol)
             def _cancel() -> None:
                 bar_list.updateEvent -= cb
-                self._ib.cancelRealTimeBars(bar_list)
+                self._ib.cancelHistoricalData(bar_list)
             self._ib.loop.call_soon_threadsafe(_cancel)
 
     def _subscribe_ibkr(self, symbol: str) -> None:
         contract = Stock(symbol, _SMART, _USD)
-        bar_list = self._ib.reqRealTimeBars(contract, 5, _WHAT_TO_SHOW, False)
+        bar_list = self._ib.reqHistoricalData(
+            contract,
+            endDateTime="",
+            durationStr="1 D",
+            barSizeSetting="1 min",
+            whatToShow="TRADES",
+            useRTH=True,
+            formatDate=2,
+            keepUpToDate=True,
+        )
 
         def on_update(bars, has_new_bar: bool) -> None:
-            if has_new_bar and self._aggregator:
-                self._aggregator.push(symbol, bars[-1])
+            # has_new_bar=True means a new minute just started — bars[-2] is the
+            # just-completed bar; bars[-1] is the new incomplete bar being built.
+            if not has_new_bar or len(bars) < 2 or not self._handler:
+                return
+            b = bars[-2]
+            ts = b.date
+            if isinstance(ts, datetime):
+                if ts.tzinfo is None:
+                    ts = ts.replace(tzinfo=timezone.utc)
+            else:
+                ts = datetime.fromisoformat(str(ts)).replace(tzinfo=timezone.utc)
+            self._handler(Bar(
+                symbol=symbol,
+                timestamp=ts,
+                open=float(b.open),
+                high=float(b.high),
+                low=float(b.low),
+                close=float(b.close),
+                volume=int(b.volume),
+            ))
 
         bar_list.updateEvent += on_update
         self._bar_lists[symbol] = (bar_list, on_update)
-        logger.debug("IBKR: subscribed to real-time bars for %s", symbol)
+        logger.debug("IBKR: subscribed to 1-min bars for %s", symbol)
 
     def run(self, stop_event: Optional[threading.Event] = None) -> None:
         if not _HAVE_IBKR:
             raise RuntimeError("ib_insync is required: pip install ib_insync")
         self._ib = IB()
-        self._aggregator = MinuteBarAggregator(self._handler or (lambda b: None))
         self._ib.connect(self._host, self._port, clientId=self._client_id)
         for symbol in list(self._symbols):
             self._subscribe_ibkr(symbol)
