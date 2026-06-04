@@ -231,7 +231,7 @@ def get_etb_set() -> set:
         return set()
 
 
-def get_movers(top_n: int = 200) -> list:
+def get_movers_alpaca(top_n: int = 200) -> list:
     """Return top gainers from Alpaca's screener endpoint.
 
     Thread-safe rate-limited to _MOVERS_MIN_INTERVAL seconds between calls.

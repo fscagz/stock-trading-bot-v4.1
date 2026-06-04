@@ -37,6 +37,7 @@ def main() -> None:
     ibkr_host = os.getenv("IBKR_HOST", "127.0.0.1")
     ibkr_port = int(os.getenv("IBKR_PORT", "4001"))
     ibkr_client_id = int(os.getenv("IBKR_CLIENT_ID_STREAM", "1"))
+    ibkr_scanner_client_id = int(os.getenv("IBKR_CLIENT_ID_SCANNER", "3"))
 
     account = broker.get_account_info()
     equity = account["portfolio_value"]
@@ -49,6 +50,7 @@ def main() -> None:
         ibkr_host=ibkr_host,
         ibkr_port=ibkr_port,
         ibkr_client_id=ibkr_client_id,
+        ibkr_scanner_client_id=ibkr_scanner_client_id,
         api_key=api_key,
         secret_key=secret_key,
         short_config=V4Config(),

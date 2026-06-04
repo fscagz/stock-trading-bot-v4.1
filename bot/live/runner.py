@@ -55,6 +55,7 @@ from zoneinfo import ZoneInfo
 import copy
 
 import bot.broker_alpaca as broker
+import bot.broker_ibkr as broker_ibkr
 from bot.backtest.news_filter import NewsFilter
 from bot.config import V4Config, make_long_config
 from bot.data.regime import RegimeFilter
@@ -91,6 +92,7 @@ class LiveRunner:
         ibkr_host: str,
         ibkr_port: int,
         ibkr_client_id: int,
+        ibkr_scanner_client_id: int,
         api_key: str,
         secret_key: str,
         short_config: V4Config,
@@ -115,6 +117,7 @@ class LiveRunner:
         self._ibkr_host = ibkr_host
         self._ibkr_port = ibkr_port
         self._ibkr_client_id = ibkr_client_id
+        self._ibkr_scanner_client_id = ibkr_scanner_client_id
         self._short_cfg = short_config
         self._long_cfg = long_config
         self._etb_set = etb_set
@@ -614,7 +617,10 @@ class LiveRunner:
             if self._stop_event.is_set():
                 break
             try:
-                movers = broker.get_movers(top_n=200)
+                movers = broker_ibkr.get_movers(
+                    self._ibkr_host, self._ibkr_port,
+                    self._ibkr_scanner_client_id, top_n=200,
+                )
             except Exception as exc:
                 logger.warning("Watchlist refresh failed: %s", exc)
                 continue
@@ -839,7 +845,10 @@ class LiveRunner:
         # --- Step 2: Fetch initial mover watchlist ---
         initial_watchlist: Set[str] = set()
         try:
-            movers = broker.get_movers(top_n=200)
+            movers = broker_ibkr.get_movers(
+                self._ibkr_host, self._ibkr_port,
+                self._ibkr_scanner_client_id, top_n=200,
+            )
             initial_watchlist = self._build_watchlist_from_movers(movers)
             logger.info("Movers endpoint: %d qualifying symbols", len(initial_watchlist))
         except Exception as exc:

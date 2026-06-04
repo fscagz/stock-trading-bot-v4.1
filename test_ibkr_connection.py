@@ -136,6 +136,84 @@ def test_realtime_bars(ib: IB) -> bool:
     return True
 
 
+def test_scanner(ib: IB) -> bool:
+    section("Scanner — TOP_PERC_GAIN (get_movers primary path)")
+    from ib_insync import ScannerSubscription
+
+    sub = ScannerSubscription(
+        instrument="STK",
+        locationCode="STK.US.MAJOR",
+        scanCode="TOP_PERC_GAIN",
+        numberOfRows=10,
+    )
+    try:
+        scan_data = ib.reqScannerData(sub)
+    except Exception as exc:
+        print(f"  {FAIL} reqScannerData failed: {exc}")
+        return False
+
+    now_et = datetime.now(_ET)
+    is_market_hours = (
+        now_et.weekday() < 5
+        and now_et.replace(hour=9, minute=30, second=0, microsecond=0)
+        <= now_et
+        <= now_et.replace(hour=16, minute=0, second=0, microsecond=0)
+    )
+
+    if not scan_data:
+        if not is_market_hours:
+            print(f"  ⚠ No results — market is closed (expected outside trading hours)")
+            print(f"  {OK} Scanner call succeeded without errors")
+            return True
+        print(f"  {FAIL} Scanner returned no results during market hours")
+        return False
+
+    print(f"  {OK} {len(scan_data)} symbols returned")
+    print(f"  {'Symbol':<10} {'distance':<12} {'benchmark':<12} {'projection'}")
+    for item in scan_data[:5]:
+        sym = item.contractDetails.contract.symbol
+        print(f"  {sym:<10} {str(item.distance):<12} {str(item.benchmark):<12} {item.projection}")
+    return True
+
+
+def test_snapshot(ib: IB) -> bool:
+    section("reqMktData snapshot — real-time then delayed fallback")
+    import math
+    contract = Stock("AAPL", "SMART", "USD")
+
+    # Try real-time first (type 1), then frozen (type 2), then delayed (type 3)
+    for mkt_type, label in [(1, "real-time"), (2, "frozen"), (3, "delayed")]:
+        ib.reqMarketDataType(mkt_type)
+        ticker = ib.reqMktData(contract, genericTickList="", snapshot=True, regulatorySnapshot=False)
+        ib.sleep(2)
+        last, close = ticker.last, ticker.close
+        print(f"  [{label}]  last={last}  close={close}  open={ticker.open}")
+
+        if not math.isnan(close) and close > 0:
+            if not math.isnan(last) and last > 0:
+                pct = (last - close) / close * 100
+                print(f"  {OK} [{label}] percent_change = {pct:.2f}%  (last={last:.2f} prev_close={close:.2f})")
+            else:
+                print(f"  {OK} [{label}] close={close:.2f} available (last NaN — market closed, expected)")
+            ib.reqMarketDataType(1)  # restore
+            return True
+
+    ib.reqMarketDataType(1)  # restore
+    now_et = datetime.now(_ET)
+    is_market_hours = (
+        now_et.weekday() < 5
+        and now_et.replace(hour=9, minute=30, second=0, microsecond=0)
+        <= now_et
+        <= now_et.replace(hour=16, minute=0, second=0, microsecond=0)
+    )
+    if not is_market_hours:
+        print(f"  ⚠ All modes returned NaN — market is closed")
+        print(f"  {OK} No errors thrown; will retest during market hours")
+        return True
+    print(f"  {FAIL} All market data modes returned NaN during market hours")
+    return False
+
+
 def main() -> None:
     print("\n╔══════════════════════════════════════════════╗")
     print("║     IBKR API Diagnostic — stock-trading-bot  ║")
@@ -156,6 +234,8 @@ def main() -> None:
     try:
         results["historical"] = test_historical_bars(ib)
         results["realtime"]   = test_realtime_bars(ib)
+        results["scanner"]    = test_scanner(ib)
+        results["snapshot"]   = test_snapshot(ib)
     finally:
         ib.disconnect()
         print(f"\n{'─' * 50}")

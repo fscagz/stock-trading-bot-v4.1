@@ -5,6 +5,7 @@ requests
 python-dotenv
 numpy
 pandas
+scipy
 pytz
 yfinance
 fastapi

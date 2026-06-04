@@ -99,10 +99,6 @@ def main() -> None:
     secret_key = os.environ["APCA_API_SECRET_KEY"]
     base_url = os.getenv("APCA_API_BASE_URL", "https://paper-api.alpaca.markets")
 
-    ibkr_host = os.getenv("IBKR_HOST", "127.0.0.1")
-    ibkr_port = int(os.getenv("IBKR_PORT", "4001"))
-    ibkr_client_id = int(os.getenv("IBKR_CLIENT_ID_FETCHER", "2"))
-
     news_mode = args.news_mode
     if news_mode == "auto":
         news_mode = "require" if args.long else "ignore"
@@ -136,7 +132,7 @@ def main() -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
 
     screener = CandidateScreener(config, api_key, secret_key, base_url)
-    fetcher = BarFetcher(ibkr_host, ibkr_port, ibkr_client_id)
+    fetcher = BarFetcher(api_key, secret_key)
     simulator = Simulator(
         config, initial_equity,
         slippage_pct=args.slippage,
@@ -218,7 +214,6 @@ def main() -> None:
         all_trades.extend(result.trades)
         logger.info("%s: %d trades closed", d, len(result.trades))
 
-    fetcher.close()
     metrics = compute_metrics(all_trades, initial_equity)
     trades_path = out_dir / f"trades_{prefix}.csv"
     summary_path = out_dir / f"summary_{prefix}.csv"
