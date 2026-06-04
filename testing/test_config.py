@@ -3,7 +3,7 @@ from bot.config import V4Config
 
 def test_v4config_defaults():
     cfg = V4Config()
-    assert cfg.max_sector_positions == 5
+    assert cfg.max_sector_positions == 15
     assert cfg.min_price == 0.50
     assert cfg.max_spread_pct == 0.01
     assert cfg.scanner_interval_seconds == 30

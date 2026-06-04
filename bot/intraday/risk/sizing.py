@@ -6,7 +6,7 @@ from bot.intraday.config import IntradayConfig
 
 @dataclass
 class SizeResult:
-    shares: int
+    shares: float
     stop_distance: float    # dollars from entry to stop
     target_distance: float  # dollars from entry to target
     capped: bool            # True if shares were reduced by max_position cap
@@ -40,14 +40,14 @@ def compute_position_size(
     target_distance = config.target_atr_multiple * atr
 
     risk_dollars = equity * config.risk_per_trade
-    uncapped_shares = int(risk_dollars / stop_distance) if stop_distance > 0 else 0
+    uncapped_shares = round(risk_dollars / stop_distance, 3) if stop_distance > 0 else 0.0
 
-    max_shares = int((equity * config.max_position_pct) / entry_price) if entry_price > 0 else 0
+    max_shares = round((equity * config.max_position_pct) / entry_price, 3) if entry_price > 0 else 0.0
     capped = uncapped_shares > max_shares
     shares = min(uncapped_shares, max_shares)
 
     return SizeResult(
-        shares=max(0, shares),
+        shares=max(0.0, shares),
         stop_distance=stop_distance,
         target_distance=target_distance,
         capped=capped,

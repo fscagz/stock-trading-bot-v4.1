@@ -19,6 +19,9 @@ import logging
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from typing import Dict, List, Optional
+from zoneinfo import ZoneInfo
+
+_ET = ZoneInfo("America/New_York")
 
 from bot.intraday.config import IntradayConfig
 from bot.intraday.execution.trade_log import TradeLogger
@@ -58,9 +61,9 @@ class _OpenPosition:
 
 
 def _et_str(ts: datetime) -> str:
-    """UTC timestamp → HH:MM Eastern (assumes EDT = UTC-4)."""
-    et_hour = (ts.hour - 4) % 24
-    return f"{et_hour:02d}:{ts.minute:02d}"
+    """UTC timestamp → HH:MM Eastern (handles EDT/EST via ZoneInfo)."""
+    et = ts.astimezone(_ET)
+    return f"{et.hour:02d}:{et.minute:02d}"
 
 
 class BacktestSimulator:
@@ -152,6 +155,12 @@ class BacktestSimulator:
         else:
             exit_price = bar.close
 
+        pnl = (
+            (exit_price - pos.entry_price) * pos.shares
+            if pos.direction == "long"
+            else (pos.entry_price - exit_price) * pos.shares
+        )
+
         slippage = abs(exit_price - bar.close) / bar.close if bar.close > 0 else 0.0
 
         self._trade_logger.log_exit(
@@ -164,14 +173,15 @@ class BacktestSimulator:
         )
 
         self._portfolio.remove_position(pos.ticker)
-        if reason == "stop":
+        self._portfolio.equity += pnl
+        if pnl < 0:
             self._portfolio.consecutive_losses += 1
         else:
             self._portfolio.consecutive_losses = 0
 
         del self._open_positions[pos.ticker]
-        logger.debug("EXIT %s %s@%.2f reason=%s", pos.ticker, pos.direction,
-                     exit_price, reason)
+        logger.debug("EXIT %s %s@%.2f pnl=%.2f reason=%s", pos.ticker, pos.direction,
+                     exit_price, pnl, reason)
 
     def _process_bar(self, bar: Bar, idx: int, all_bars: List[Bar]) -> None:
         sym = bar.symbol
@@ -250,6 +260,9 @@ class BacktestSimulator:
 
         # Portfolio/risk checks
         if self._regime == Regime.CRASH:
+            self._aggregator.clear(sym)
+            return
+        if self._regime == Regime.HIGH_VOL and len(self._open_positions) >= 2:
             self._aggregator.clear(sym)
             return
 

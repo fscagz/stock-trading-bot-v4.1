@@ -43,8 +43,8 @@ def main() -> None:
     equity = account["portfolio_value"]
     logger.info("Account equity: $%.2f | Status: %s", equity, account["status"])
 
-    etb_set = broker.get_etb_set()
-    logger.info("ETB set: %d shortable symbols", len(etb_set))
+    # Short strategy is deprecated — pass empty ETB set so short entries never fire.
+    etb_set: set = set()
 
     runner = LiveRunner(
         ibkr_host=ibkr_host,

@@ -1,4 +1,5 @@
 from __future__ import annotations
+import asyncio
 import logging
 import threading
 from datetime import datetime, timezone
@@ -52,6 +53,7 @@ class BarStream:
         self._symbols: Set[str] = set(symbols)
         self._handler: Optional[BarHandler] = None
         self._ib: Optional[IB] = None
+        self._loop: Optional[asyncio.AbstractEventLoop] = None
         # symbol -> (BarDataList, callback) — kept so we can unsubscribe cleanly
         self._bar_lists: Dict[str, Tuple] = {}
 
@@ -66,30 +68,56 @@ class BarStream:
         if symbol in self._symbols:
             return
         self._symbols.add(symbol)
-        if self._ib is not None and self._ib.isConnected():
-            self._ib.loop.call_soon_threadsafe(self._subscribe_ibkr, symbol)
+        if self._ib is not None and self._ib.isConnected() and self._loop is not None:
+            asyncio.run_coroutine_threadsafe(self._subscribe_ibkr(symbol), self._loop)
 
     def unsubscribe(self, symbol: str) -> None:
         self._symbols.discard(symbol)
-        if self._ib is not None and symbol in self._bar_lists:
+        if self._ib is not None and symbol in self._bar_lists and self._loop is not None:
             bar_list, cb = self._bar_lists.pop(symbol)
             def _cancel() -> None:
                 bar_list.updateEvent -= cb
                 self._ib.cancelHistoricalData(bar_list)
-            self._ib.loop.call_soon_threadsafe(_cancel)
+            self._loop.call_soon_threadsafe(_cancel)
 
-    def _subscribe_ibkr(self, symbol: str) -> None:
+    def _on_ibkr_error(self, reqId: int, errorCode: int, errorString: str, contract) -> None:
+        if errorCode == 1100:
+            # IBKR cancelled all keepUpToDate subscriptions on disconnect
+            self._bar_lists.clear()
+            logger.warning("BarStream: IBKR disconnected — subscriptions cleared")
+        elif errorCode == 1102:
+            # Connection restored — re-subscribe any symbol not currently active
+            missing = self._symbols - self._bar_lists.keys()
+            logger.info("BarStream: IBKR reconnected — re-subscribing %d symbols", len(missing))
+            for symbol in missing:
+                asyncio.ensure_future(self._subscribe_ibkr(symbol))
+
+    async def _subscribe_ibkr(self, symbol: str) -> None:
         contract = Stock(symbol, _SMART, _USD)
-        bar_list = self._ib.reqHistoricalData(
-            contract,
-            endDateTime="",
-            durationStr="1 D",
-            barSizeSetting="1 min",
-            whatToShow="TRADES",
-            useRTH=True,
-            formatDate=2,
-            keepUpToDate=True,
-        )
+        try:
+            bar_list = await asyncio.wait_for(
+                self._ib.reqHistoricalDataAsync(
+                    contract,
+                    endDateTime="",
+                    durationStr="3600 S",
+                    barSizeSetting="1 min",
+                    whatToShow="TRADES",
+                    useRTH=True,
+                    formatDate=2,
+                    keepUpToDate=True,
+                ),
+                timeout=30.0,
+            )
+        except asyncio.TimeoutError:
+            logger.debug("IBKR: subscription timed out for %s (unsupported or no data)", symbol)
+            return
+        except Exception as exc:
+            logger.debug("IBKR: could not subscribe to bars for %s: %s", symbol, exc)
+            return
+
+        if not bar_list:
+            logger.debug("IBKR: no bars returned for %s", symbol)
+            return
 
         def on_update(bars, has_new_bar: bool) -> None:
             # has_new_bar=True means a new minute just started — bars[-2] is the
@@ -122,8 +150,10 @@ class BarStream:
             raise RuntimeError("ib_insync is required: pip install ib_insync")
         self._ib = IB()
         self._ib.connect(self._host, self._port, clientId=self._client_id)
+        self._loop = asyncio.get_event_loop()
+        self._ib.errorEvent += self._on_ibkr_error
         for symbol in list(self._symbols):
-            self._subscribe_ibkr(symbol)
+            self._loop.run_until_complete(self._subscribe_ibkr(symbol))
         logger.info("BarStream: connected to IB Gateway, streaming %d symbols", len(self._symbols))
 
         if stop_event is not None:
@@ -173,9 +203,11 @@ class BarStream:
             finally:
                 if self._ib is not None:
                     try:
+                        self._ib.errorEvent -= self._on_ibkr_error
                         self._ib.disconnect()
                     except Exception:
                         pass
                     self._ib = None
+                self._loop = None
                 self._bar_lists.clear()
             stop_event.wait(timeout=delay)

@@ -133,11 +133,15 @@ def main() -> None:
 
     screener = CandidateScreener(config, api_key, secret_key, base_url)
     fetcher = BarFetcher(api_key, secret_key)
+    # Long strategy: market-fill (live bot uses market orders at signal bar close)
+    # and no overnight holds (live bot force-closes everything at 15:55).
+    market_fill = args.market_fill or args.long
+    overnight = False if args.long else not args.no_overnight
     simulator = Simulator(
         config, initial_equity,
         slippage_pct=args.slippage,
-        overnight_holds=not args.no_overnight,
-        market_order_fill=args.market_fill,
+        overnight_holds=overnight,
+        market_order_fill=market_fill,
         news_filter=news_filter,
         news_mode=news_mode,
     )

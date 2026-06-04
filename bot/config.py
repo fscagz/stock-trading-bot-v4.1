@@ -64,6 +64,9 @@ def make_long_config() -> V4Config:
     cfg.stage1_min_price_change_pct = 0.15
     cfg.stage1_min_price = 2.00
     cfg.min_price = 2.00
+    # Disable dollar-volume floor: catalyst small-caps have low avg DV but sustain
+    # momentum after news gaps — the news filter + stage2 validator are the quality gates.
+    cfg.min_avg_dollar_volume = 0.0
     cfg.stage2_roc_min_pct = 0.07
     cfg.stage2_min_relative_volume = 10.0
     cfg.stage2_buying_pressure_min = 0.85

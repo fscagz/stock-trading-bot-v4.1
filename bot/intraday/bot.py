@@ -21,6 +21,9 @@ import os
 import threading
 from datetime import date, datetime, timezone
 from typing import Dict, List, Optional, Tuple
+from zoneinfo import ZoneInfo
+
+_ET = ZoneInfo("America/New_York")
 
 from bot.intraday.config import IntradayConfig
 from bot.intraday.data.event_calendar import EventCalendar
@@ -170,9 +173,9 @@ class IntradayBot:
         logger.info("Session initialized. Equity=%.2f Regime=%s", equity, regime.value)
 
     def _et_time_str(self, ts: datetime) -> str:
-        """Return HH:MM string in Eastern Time (simplified: UTC-4 for EDT)."""
-        et_hour = (ts.hour - 4) % 24
-        return f"{et_hour:02d}:{ts.minute:02d}"
+        """Return HH:MM string in Eastern Time (handles EDT/EST via ZoneInfo)."""
+        et = ts.astimezone(_ET)
+        return f"{et.hour:02d}:{et.minute:02d}"
 
     def _on_bar(self, bar: Bar) -> None:
         if self._portfolio is None:
@@ -352,13 +355,18 @@ class IntradayBot:
 
                 # Log exit
                 now_utc = datetime.now(timezone.utc)
+                expected_price = pos.stop_price if side == "stop" else pos.target_price
+                actual_slippage = (
+                    abs(exit_price - expected_price) / expected_price
+                    if expected_price > 0 else 0.0
+                )
                 self._trade_logger.log_exit(
                     ticker=ticker,
                     entry_time=pos.entry_time,
                     exit_price=exit_price,
                     exit_time=now_utc,
                     exit_reason=exit_reason,
-                    actual_slippage_pct=self._cfg.expected_exit_slippage_pct,
+                    actual_slippage_pct=actual_slippage,
                 )
                 logger.info(
                     "EXIT %s %s %d@%.2f pnl=%.2f reason=%s",

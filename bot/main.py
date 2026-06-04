@@ -106,6 +106,9 @@ def main() -> None:
     secret_key = os.environ["APCA_API_SECRET_KEY"]
 
     base_url = os.getenv("APCA_API_BASE_URL", "https://paper-api.alpaca.markets")
+    ibkr_host = os.getenv("IBKR_HOST", "127.0.0.1")
+    ibkr_port = int(os.getenv("IBKR_PORT", "4002"))
+    ibkr_client_id_stream = int(os.getenv("IBKR_CLIENT_ID_STREAM", "1"))
     config = make_long_config()
     account = broker.get_account_info()
     equity = account["portfolio_value"]
@@ -140,7 +143,7 @@ def main() -> None:
     trade_logger = TradeLogger(log_dir="logs")
     news_filter = NewsFilter(api_key, secret_key, cache_only=False)
 
-    stream = BarStream(api_key, secret_key, symbols=[])
+    stream = BarStream(ibkr_host, ibkr_port, ibkr_client_id_stream, symbols=[])
     watchlist = Watchlist(stream, config)
     scanner = MarketScanner(api_key, secret_key, config, watchlist, base_url=base_url)
 
@@ -226,8 +229,8 @@ def main() -> None:
 
         mult = config.confidence_multiplier(validator.confidence_score(bar, baseline))
         if mult > 1.0:
-            max_shares = int(portfolio.equity * config.max_position_pct / bar.close)
-            size.shares = min(int(size.shares * mult), max(0, max_shares))
+            max_shares = round(portfolio.equity * config.max_position_pct / bar.close, 3)
+            size.shares = min(round(size.shares * mult, 3), max(0.0, max_shares))
         if size.shares <= 0:
             return
 

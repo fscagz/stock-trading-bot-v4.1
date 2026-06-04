@@ -35,7 +35,7 @@ class Signal:
 class Position:
     ticker: str
     direction: Direction
-    shares: int
+    shares: float
     entry_price: float
     stop_price: float
     target_price: float
@@ -61,7 +61,7 @@ class TradeRecord:
     direction: Direction
     entry_time: datetime
     entry_price: float
-    shares: int
+    shares: float
     stop_price: float
     target_price: float
     signals: List[str]

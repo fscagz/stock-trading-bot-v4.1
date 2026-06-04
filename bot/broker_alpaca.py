@@ -82,7 +82,7 @@ def get_all_positions_detail() -> dict:
 # Orders
 # ------------------------------------------------------------------
 
-def submit_market_order(symbol: str, qty: int, side: str = "buy") -> str:
+def submit_market_order(symbol: str, qty: float, side: str = "buy") -> str:
     order = MarketOrderRequest(
         symbol=symbol,
         qty=qty,
@@ -93,7 +93,7 @@ def submit_market_order(symbol: str, qty: int, side: str = "buy") -> str:
     return result.id
 
 
-def submit_limit_order(symbol: str, qty: int, side: str, limit_price: float) -> str:
+def submit_limit_order(symbol: str, qty: float, side: str, limit_price: float) -> str:
     order = LimitOrderRequest(
         symbol=symbol,
         qty=qty,
@@ -105,11 +105,11 @@ def submit_limit_order(symbol: str, qty: int, side: str, limit_price: float) -> 
     return result.id
 
 
-def submit_stop_order(symbol: str, qty: int, stop_price: float) -> str:
+def submit_stop_order(symbol: str, qty: float, stop_price: float) -> str:
     """Stop sell order — protects a long position."""
     order = StopOrderRequest(
         symbol=symbol,
-        qty=qty,
+        qty=int(qty),  # Alpaca stop orders require whole shares
         side=OrderSide.SELL,
         time_in_force=TimeInForce.DAY,
         stop_price=round(stop_price, 2),
@@ -118,11 +118,11 @@ def submit_stop_order(symbol: str, qty: int, stop_price: float) -> str:
     return result.id
 
 
-def submit_stop_buy_order(symbol: str, qty: int, stop_price: float) -> str:
+def submit_stop_buy_order(symbol: str, qty: float, stop_price: float) -> str:
     """Stop buy order — protects a short position (buy-to-cover if price rises to stop)."""
     order = StopOrderRequest(
         symbol=symbol,
-        qty=qty,
+        qty=int(qty),  # Alpaca stop orders require whole shares
         side=OrderSide.BUY,
         time_in_force=TimeInForce.DAY,
         stop_price=round(stop_price, 2),
@@ -131,7 +131,7 @@ def submit_stop_buy_order(symbol: str, qty: int, stop_price: float) -> str:
     return result.id
 
 
-def short_sell(symbol: str, qty: int) -> str:
+def short_sell(symbol: str, qty: float) -> str:
     """Market sell to open a short position."""
     order = MarketOrderRequest(
         symbol=symbol,
@@ -143,7 +143,7 @@ def short_sell(symbol: str, qty: int) -> str:
     return result.id
 
 
-def buy_to_cover(symbol: str, qty: int) -> str:
+def buy_to_cover(symbol: str, qty: float) -> str:
     """Market buy to close a short position."""
     order = MarketOrderRequest(
         symbol=symbol,
@@ -155,7 +155,7 @@ def buy_to_cover(symbol: str, qty: int) -> str:
     return result.id
 
 
-def buy(symbol: str, qty: int) -> str:
+def buy(symbol: str, qty: float) -> str:
     """Market buy to open a long position."""
     order = MarketOrderRequest(
         symbol=symbol,
@@ -167,7 +167,7 @@ def buy(symbol: str, qty: int) -> str:
     return result.id
 
 
-def sell(symbol: str, qty: int) -> str:
+def sell(symbol: str, qty: float) -> str:
     """Market sell to close a long position."""
     order = MarketOrderRequest(
         symbol=symbol,
@@ -248,7 +248,7 @@ def get_movers_alpaca(top_n: int = 200) -> list:
     resp = _req.get(
         "https://data.alpaca.markets/v1beta1/screener/stocks/movers",
         headers={"APCA-API-KEY-ID": API_KEY, "APCA-API-SECRET-KEY": API_SECRET},
-        params={"top": top_n},
+        params={"top": min(top_n, 50)},  # endpoint max is 50
         timeout=10,
     )
     resp.raise_for_status()

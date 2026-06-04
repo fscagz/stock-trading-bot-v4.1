@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 import math
 import time
@@ -26,6 +27,13 @@ def get_movers_ibkr(host: str, port: int, client_id: int, top_n: int = 200) -> L
     """
     if not _HAVE_IBKR:
         raise RuntimeError("ib_insync is required: pip install ib_insync")
+
+    # ib_insync uses asyncio internally; non-main threads have no event loop by default
+    # in Python 3.10+, so we must create one before connecting.
+    try:
+        asyncio.get_event_loop()
+    except RuntimeError:
+        asyncio.set_event_loop(asyncio.new_event_loop())
 
     ib = IB()
     ib.connect(host, port, clientId=client_id)

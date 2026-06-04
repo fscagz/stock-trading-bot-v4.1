@@ -124,7 +124,7 @@ class LiveRunner:
         self._api_key = api_key
         self._secret_key = secret_key
 
-        self._news_filter = NewsFilter(api_key, secret_key)
+        self._news_filter = NewsFilter(api_key, secret_key, cache_only=False)
         self._regime_filter = RegimeFilter()
         self._regime: dict = {"date": None, "uptrend": True}  # re-evaluated each trading day
 
@@ -157,6 +157,11 @@ class LiveRunner:
         self._stream: Optional[BarStream] = None
         self._stop_event = threading.Event()
         self._current_watchlist: Set[str] = set()
+
+        # Protects the claim-and-remove step in _execute_close and
+        # _submit_eod_close_orders so a bar event and the EOD timer thread
+        # can't both close the same position and submit duplicate broker orders.
+        self._close_lock = threading.Lock()
 
     def _sync_equity(self, new_equity: float) -> None:
         """Propagate an equity change to both portfolio states."""
@@ -457,7 +462,8 @@ class LiveRunner:
         self._state.save_position(position)
 
     def _execute_close(self, sym: str, fill_price: float, reason: str, portfolio: PortfolioState) -> None:
-        position = portfolio.remove_position(sym)
+        with self._close_lock:
+            position = portfolio.remove_position(sym)
         if not position:
             return
         with self._open_syms_lock:
@@ -778,11 +784,10 @@ class LiveRunner:
     def _submit_eod_close_orders(self) -> None:
         """Submit market close orders for all open positions. Called from EOD timer thread.
 
-        Submits broker orders only; does not rely on bar events. Individual dict ops
-        (get, pop) are GIL-safe so no portfolio lock is needed. If _on_bar already
-        closed a position, `positions.get(sym)` returns None and we skip it.
-        A double-close attempt reaches the broker as a zero-position sell which
-        Alpaca rejects — the exception is caught and logged.
+        Uses _close_lock to atomically claim each position before submitting the
+        broker order, preventing a double-close race with _on_bar/_execute_close
+        (which runs on the asyncio event loop thread for halted stocks that resume
+        near 15:55 with a late bar).
         """
         short_syms = list(self._short_portfolio.positions.keys())
         long_syms = list(self._long_portfolio.positions.keys())
@@ -793,9 +798,11 @@ class LiveRunner:
             len(short_syms), len(long_syms),
         )
         for sym in short_syms:
-            pos = self._short_portfolio.positions.get(sym)
-            if pos is None:
-                continue
+            with self._close_lock:
+                pos = self._short_portfolio.positions.get(sym)
+                if pos is None:
+                    continue
+                self._short_portfolio.remove_position(sym)
             try:
                 if pos.stop_order_id:
                     try:
@@ -803,7 +810,6 @@ class LiveRunner:
                     except Exception:
                         pass
                 broker.buy_to_cover(sym, pos.shares)
-                self._short_portfolio.remove_position(sym)
                 with self._open_syms_lock:
                     self._open_syms.discard(sym)
                 self._state.remove_position(sym)
@@ -811,9 +817,11 @@ class LiveRunner:
             except Exception as exc:
                 logger.error("EOD timer: failed to cover %s: %s — check account manually", sym, exc)
         for sym in long_syms:
-            pos = self._long_portfolio.positions.get(sym)
-            if pos is None:
-                continue
+            with self._close_lock:
+                pos = self._long_portfolio.positions.get(sym)
+                if pos is None:
+                    continue
+                self._long_portfolio.remove_position(sym)
             try:
                 if pos.stop_order_id:
                     try:
@@ -821,7 +829,6 @@ class LiveRunner:
                     except Exception:
                         pass
                 broker.sell(sym, pos.shares)
-                self._long_portfolio.remove_position(sym)
                 with self._open_syms_lock:
                     self._open_syms.discard(sym)
                 self._state.remove_position(sym)
