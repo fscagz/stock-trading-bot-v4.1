@@ -184,6 +184,42 @@ class LiveRunner:
         self._short_portfolio.equity = new_equity
         self._long_portfolio.equity = new_equity
 
+    def _reset_daily_state(self) -> None:
+        """Reset all per-session state at the start of each new trading day.
+
+        Called on the first bar of a new session so the bot behaves correctly
+        when running 24/7 without restarts.
+        """
+        # Reconcile equity with broker before resetting session_start_equity
+        # so daily_pnl_pct() is accurate for the new day.
+        try:
+            actual_equity = broker.get_account_info()["portfolio_value"]
+            self._sync_equity(actual_equity)
+            logger.info("Daily equity sync: $%.2f", actual_equity)
+        except Exception as exc:
+            logger.warning("Could not sync equity at day rollover: %s — using last known value", exc)
+
+        for portfolio in (self._long_portfolio, self._short_portfolio):
+            portfolio.session_start_equity  = portfolio.equity
+            portfolio.kill_switch_active    = False
+            portfolio.consecutive_losses    = 0
+            portfolio.cooldown_until        = None
+            portfolio.session_slippage_actual   = 0.0
+            portfolio.session_slippage_expected = 0.0
+
+        # Refresh baseline volumes for all currently-watched symbols so the
+        # 20-day average stays current rather than using stale day-1 values.
+        with self._baseline_vols_lock:
+            watched = list(self._baseline_vols.keys())
+        if watched:
+            self._fetch_baseline_volumes(watched)
+
+        logger.info(
+            "Daily state reset complete — kill switch cleared, "
+            "session equity anchor updated, %d baseline volumes refreshed",
+            len(watched),
+        )
+
     def _sync_dash(self, closed_record: Optional[TradeRecord] = None) -> None:
         if self._dash is None:
             return
@@ -288,6 +324,7 @@ class LiveRunner:
         if self._trading_date != today:
             if self._trading_date is not None:
                 self._flush_bar_cache()   # write previous day's bars before clearing
+                self._reset_daily_state()
             self._trading_date = today
             self._entered_today.clear()
             self._day_highs.clear()
