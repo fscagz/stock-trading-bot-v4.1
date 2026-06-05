@@ -46,9 +46,11 @@ Run with:  python -m bot.live [--risk-scale 0.5]
 """
 from __future__ import annotations
 
+import json
 import logging
 import threading
 from datetime import date, datetime, time as dtime, timedelta
+from pathlib import Path
 from typing import Dict, List, Optional, Set
 from zoneinfo import ZoneInfo
 
@@ -162,6 +164,11 @@ class LiveRunner:
 
         # --- Session state (persisted to disk) ---
         self._state = SessionState()
+
+        # --- IBKR bar cache (written to backtest cache at EOD) ---
+        self._live_bar_cache: Dict[str, List[dict]] = {}
+        self._bar_cache_dir = Path("backtest_results/cache")
+        self._bar_cache_dir.mkdir(parents=True, exist_ok=True)
 
         self._stream: Optional[BarStream] = None
         self._stop_event = threading.Event()
@@ -288,6 +295,14 @@ class LiveRunner:
         # Track running intraday high for each symbol (for stage2_min_dist_from_day_high_pct)
         if bar.high > self._day_highs.get(sym, 0.0):
             self._day_highs[sym] = bar.high
+
+        # Accumulate bar for EOD backtest cache write (market hours only)
+        if dtime(9, 30) <= bar_et.time() <= dtime(16, 0):
+            self._live_bar_cache.setdefault(sym, []).append({
+                "t": bar.timestamp.isoformat(),
+                "o": bar.open, "h": bar.high, "l": bar.low,
+                "c": bar.close, "v": bar.volume,
+            })
 
         atr_ind, vwap_ind = self._get_or_create_indicators(sym)
         atr_val = atr_ind.update(bar)
@@ -823,6 +838,29 @@ class LiveRunner:
         logger.info("Fetching baseline volumes for %d initial symbols...", len(symbols))
         self._fetch_baseline_volumes(symbols)
 
+    def _flush_bar_cache(self) -> None:
+        """Write accumulated IBKR bars to the backtest cache directory.
+
+        Skips symbols whose file already exists (Alpaca historical data takes
+        precedence for past dates; this only fills in today's bars going forward).
+        """
+        today = date.today()
+        written = skipped = 0
+        for sym, bars in self._live_bar_cache.items():
+            if not bars:
+                continue
+            cache_path = self._bar_cache_dir / f"{sym}_{today}.json"
+            if cache_path.exists():
+                skipped += 1
+                continue
+            cache_path.write_text(json.dumps(bars))
+            written += 1
+        logger.info(
+            "IBKR bar cache flushed: %d files written, %d skipped (already cached) for %s",
+            written, skipped, today,
+        )
+        self._live_bar_cache.clear()
+
     # ------------------------------------------------------------------
     # ETB refresh — daemon thread (fix: ETB list loaded once at startup)
     # ------------------------------------------------------------------
@@ -983,6 +1021,7 @@ class LiveRunner:
             self._stream.run_with_reconnect(self._stop_event)
         finally:
             self._stop_event.set()
+            self._flush_bar_cache()
             all_open = {**self._short_portfolio.positions, **self._long_portfolio.positions}
             logger.info(
                 "Session ended. Equity: $%.2f | Open positions: %d",
