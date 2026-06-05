@@ -44,10 +44,10 @@ END = date(2022, 12, 30)
 PRELOAD_START = date(2021, 11, 29)  # 35-day buffer before 2022
 PRELOAD_END = date(2023, 1, 1)
 
-# Long strategy thresholds (matches make_long_config)
+# Long strategy thresholds (matches make_long_config exactly)
 STAGE1_MIN_PCT_CHANGE = 0.15
 STAGE1_MIN_PRICE = 2.00
-MIN_AVG_DOLLAR_VOLUME = 250_000
+MIN_AVG_DOLLAR_VOLUME = 0  # cache all candidates; CandidateScreener applies the $500k DV filter at runtime
 
 
 def trading_days(start: date, end: date) -> List[date]:
@@ -187,10 +187,10 @@ def candidates_for_date(trade_date: date, daily_cache: Dict[str, pd.DataFrame]) 
         pct_change = (day_high - prev_close) / prev_close
         past = df[df.index < target_ts]
         avg_dollar_vol = float(past["volume"].tail(20).mean() * day_close) if not past.empty else 0.0
-        if pct_change >= STAGE1_MIN_PCT_CHANGE and avg_dollar_vol >= MIN_AVG_DOLLAR_VOLUME:
+        if pct_change >= STAGE1_MIN_PCT_CHANGE and (MIN_AVG_DOLLAR_VOLUME == 0 or avg_dollar_vol >= MIN_AVG_DOLLAR_VOLUME):
             scored.append((pct_change, sym))
     scored.sort(reverse=True)
-    return [sym for _, sym in scored[:200]]
+    return [sym for _, sym in scored]  # no cap — matches CandidateScreener behaviour
 
 
 def fetch_intraday_sip(symbol: str, trade_date: date) -> Optional[list]:

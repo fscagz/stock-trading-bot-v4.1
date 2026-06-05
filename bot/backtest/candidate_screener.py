@@ -109,6 +109,10 @@ class CandidateScreener:
 
         index: Dict[date, List[str]] = {d: [] for d in days}
 
+        # First pass: collect (pct_change, sym) per day so we can apply the
+        # top-200 cap that mirrors the live bot's IBKR scanner (top_n=200).
+        day_scored: Dict[date, list] = {d: [] for d in days}
+
         for sym, df in self._daily_cache.items():
             if df.empty or len(df) < 2:
                 continue
@@ -121,7 +125,13 @@ class CandidateScreener:
             qualifying_ts = df.index[passes_price.fillna(False)]
             for ts in qualifying_ts:
                 if ts in day_set:
-                    index[ts.date()].append(sym)
+                    day_scored[ts.date()].append((float(pct_chg.loc[ts]), sym))
+
+        # Second pass: sort descending by % gain and cap at 200 — mirrors
+        # IBKR scanner TOP_PERC_GAIN with numberOfRows=200.
+        for d, scored in day_scored.items():
+            scored.sort(reverse=True)
+            index[d] = [sym for _, sym in scored[:200]]
 
         self._candidates_index = index
         logger.info("CandidateScreener: index built — %d days, avg %.0f candidates/day",
@@ -210,7 +220,7 @@ class CandidateScreener:
             if idx == 0:
                 continue
             prev_close = float(df.iloc[idx - 1]["close"])
-            day_high = float(df.iloc[idx]["high"])
+            day_high  = float(df.iloc[idx]["high"])
             day_close = float(df.iloc[idx]["close"])
             if prev_close <= 0:
                 continue

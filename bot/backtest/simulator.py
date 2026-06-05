@@ -37,6 +37,7 @@ class Simulator:
         market_order_fill: bool = False,
         news_filter: Optional[NewsFilter] = None,
         news_mode: str = "ignore",
+        require_above_vwap_at_entry: bool = False,
     ) -> None:
         self._config = config
         self._initial_equity = initial_equity
@@ -45,6 +46,7 @@ class Simulator:
         self._market_order_fill = market_order_fill
         self._news_filter = news_filter
         self._news_mode = news_mode
+        self._require_above_vwap_at_entry = require_above_vwap_at_entry
 
     def run_day(
         self,
@@ -176,6 +178,8 @@ class Simulator:
             if not can_enter:
                 continue
             if validator.validate(bar, baseline):
+                if self._require_above_vwap_at_entry and (vwap_val is None or bar.close <= vwap_val):
+                    continue
                 size = compute_position_size(portfolio.equity, atr_val, bar.close, self._config)
                 if size.shares > 0:
                     mult = self._config.confidence_multiplier(

@@ -111,4 +111,5 @@ class MarketScanner:
                         })
             except Exception as exc:
                 logger.warning("Snapshot batch failed (offset=%d): %s", i, exc)
+            time.sleep(0.5)
         return results

@@ -64,11 +64,13 @@ class MomentumValidator:
         past_close = history[-(lookback + 1)].close
         roc = (bar.close - past_close) / past_close if past_close > 0 else 0
         roc_min = self._cfg.stage2_roc_min_pct
-        roc_score = min(1.0, max(0.0, (roc - roc_min) / (3 * roc_min))) if roc_min > 0 else 0.5
+        roc_range_mult = getattr(self._cfg, "confidence_score_roc_range_mult", 3.0)
+        roc_score = min(1.0, max(0.0, (roc - roc_min) / (roc_range_mult * roc_min))) if roc_min > 0 else 0.5
 
         rel_vol = bar.volume / baseline_volume_per_min
         vol_min = self._cfg.stage2_min_relative_volume
-        vol_score = min(1.0, max(0.0, (rel_vol - vol_min) / (3 * vol_min))) if vol_min > 0 else 0.5
+        vol_range_mult = getattr(self._cfg, "confidence_score_vol_range_mult", 3.0)
+        vol_score = min(1.0, max(0.0, (rel_vol - vol_min) / (vol_range_mult * vol_min))) if vol_min > 0 else 0.5
 
         bar_range = bar.high - bar.low
         close_pos = (bar.close - bar.low) / bar_range if bar_range > 0 else 0.5

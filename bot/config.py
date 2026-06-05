@@ -47,6 +47,13 @@ class V4Config(IntradayConfig):
     confidence_tier3_multiplier: float = 1.0
     confidence_tier4_multiplier: float = 1.0
 
+    # --- Confidence score normalization ranges ---
+    # roc_score  hits 1.0 at (1 + roc_range_mult)  × stage2_roc_min_pct
+    # vol_score  hits 1.0 at (1 + vol_range_mult)  × stage2_min_relative_volume
+    # Wider ranges spread catalyst plays across tiers instead of saturating at tier4.
+    confidence_score_roc_range_mult: float = 3.0  # default matches legacy behaviour
+    confidence_score_vol_range_mult: float = 3.0  # default matches legacy behaviour
+
     def confidence_multiplier(self, score: float) -> float:
         """Map 0–1 confidence score to a position-size multiplier."""
         if score >= 0.75:
@@ -75,8 +82,13 @@ def make_long_config() -> V4Config:
     cfg.max_portfolio_heat = 0.12
     cfg.confidence_tier1_multiplier = 1.0
     cfg.confidence_tier2_multiplier = 2.0
-    cfg.confidence_tier3_multiplier = 4.0
-    cfg.confidence_tier4_multiplier = 8.0
+    cfg.confidence_tier3_multiplier = 3.0
+    cfg.confidence_tier4_multiplier = 4.0
+    # Wider normalization ranges: spread catalyst plays across all four tiers.
+    # vol_score = 1.0 at 80× rel-vol (8× the 10× min); roc_score = 1.0 at 35% ROC (5× the 7% min)
+    cfg.confidence_score_roc_range_mult = 4.0
+    cfg.confidence_score_vol_range_mult = 7.0
+    cfg.min_avg_dollar_volume = 500_000
     return cfg
 
 
