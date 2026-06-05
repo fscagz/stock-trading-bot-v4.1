@@ -89,27 +89,40 @@ class MarketScanner:
         results = []
         for i in range(0, len(self._universe), _BATCH_SIZE):
             batch = self._universe[i:i + _BATCH_SIZE]
-            try:
-                resp = requests.get(
-                    _SNAPSHOTS_URL,
-                    headers=self._headers,
-                    params={"symbols": ",".join(batch), "feed": "iex"},
-                    timeout=15,
-                )
-                resp.raise_for_status()
-                for symbol, snap in resp.json().items():
-                    daily = snap.get("dailyBar") or {}
-                    prev = snap.get("prevDailyBar") or {}
-                    price = daily.get("c", 0.0)
-                    prev_close = prev.get("c", 0.0)
-                    if prev_close > 0 and price > 0:
-                        results.append({
-                            "symbol": symbol,
-                            "percent_change": (price - prev_close) / prev_close * 100,
-                            "price": price,
-                            "volume": daily.get("v", 0),
-                        })
-            except Exception as exc:
-                logger.warning("Snapshot batch failed (offset=%d): %s", i, exc)
+            for attempt in range(4):
+                try:
+                    resp = requests.get(
+                        _SNAPSHOTS_URL,
+                        headers=self._headers,
+                        params={"symbols": ",".join(batch), "feed": "iex"},
+                        timeout=15,
+                    )
+                    if resp.status_code == 429:
+                        wait = 2 ** attempt
+                        logger.warning(
+                            "Snapshot rate-limited (offset=%d) — retrying in %ds (attempt %d/4)",
+                            i, wait, attempt + 1,
+                        )
+                        time.sleep(wait)
+                        continue
+                    resp.raise_for_status()
+                    for symbol, snap in resp.json().items():
+                        daily = snap.get("dailyBar") or {}
+                        prev = snap.get("prevDailyBar") or {}
+                        price = daily.get("c", 0.0)
+                        prev_close = prev.get("c", 0.0)
+                        if prev_close > 0 and price > 0:
+                            results.append({
+                                "symbol": symbol,
+                                "percent_change": (price - prev_close) / prev_close * 100,
+                                "price": price,
+                                "volume": daily.get("v", 0),
+                            })
+                    break  # success — move to next batch
+                except Exception as exc:
+                    if attempt == 3:
+                        logger.warning("Snapshot batch failed (offset=%d): %s", i, exc)
+                    else:
+                        time.sleep(2 ** attempt)
             time.sleep(0.5)
         return results
