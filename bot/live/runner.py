@@ -67,6 +67,7 @@ from bot.intraday.risk.portfolio import PortfolioState
 from bot.intraday.risk.sizing import compute_position_size
 from bot.intraday.types import Bar, Position, TradeRecord
 from bot.live.state import SessionState
+from bot.intraday.risk.kill_switch import KillSwitch
 from bot.momentum.validator import MomentumValidator
 from bot.positions.manager import PositionManager
 from bot.trade_logger import TradeLogger
@@ -144,6 +145,7 @@ class LiveRunner:
         self._long_validator = MomentumValidator(long_config)
         self._short_manager = PositionManager(short_config)
         self._long_manager = PositionManager(long_config)
+        self._long_kill_switch = KillSwitch(long_config)
         self._atrs: Dict[str, ATRIndicator] = {}
         self._vwaps: Dict[str, VWAPIndicator] = {}
         self._entered_today: Set[str] = set()
@@ -348,6 +350,15 @@ class LiveRunner:
         if sym in self._entered_today:
             return
         if not (atr_val and baseline > 0):
+            return
+
+        # Check kill switch / cooldown for long portfolio on every entry-eligible bar
+        triggered, ks_reason = self._long_kill_switch.check(self._long_portfolio, bar.timestamp)
+        if triggered:
+            logger.warning("KILL SWITCH: %s — long entries halted for session", ks_reason)
+            self._sync_dash()
+            return
+        if self._long_portfolio.in_cooldown(bar.timestamp):
             return
 
         # --- Short entry (ETB-only, independent heat budget) ---
@@ -555,6 +566,12 @@ class LiveRunner:
                 "%s by broker stop %s x%d pnl≈%.2f reason=%s equity≈%.2f",
                 action, sym, position.shares, pnl, reason, self._equity,
             )
+
+        # Update consecutive loss counter on the relevant portfolio
+        if pnl < 0:
+            portfolio.consecutive_losses += 1
+        else:
+            portfolio.consecutive_losses = 0
 
         record = self._open_records.pop(sym, None)
         if record is not None:
