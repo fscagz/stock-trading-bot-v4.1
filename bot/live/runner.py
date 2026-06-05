@@ -393,9 +393,17 @@ class LiveRunner:
 
                 can_enter, reason = self._long_portfolio.can_enter(sector="Unknown", now=bar.timestamp)
                 if can_enter and self._long_validator.validate(bar, baseline):
-                    if not self._news_filter.has_catalyst(sym, today):
-                        logger.debug("No catalyst for %s — skipping long entry", sym)
-                    else:
+                    has_cat = self._news_filter.has_catalyst(sym, today)
+                    if not has_cat:
+                        # Tier-4 bypass: extreme confidence signal (4× mult) doesn't need
+                        # external news — the volume + ROC combination IS the catalyst.
+                        conf = self._long_validator.confidence_score(bar, baseline)
+                        if self._long_cfg.confidence_multiplier(conf) >= 4.0:
+                            logger.info("Tier-4 bypass for %s — entering without news catalyst", sym)
+                            has_cat = True
+                        else:
+                            logger.debug("No catalyst for %s — skipping entry", sym)
+                    if has_cat:
                         self._enter_long(sym, bar, atr_val, baseline)
                 elif not can_enter:
                     logger.debug("Long blocked for %s: %s", sym, reason)

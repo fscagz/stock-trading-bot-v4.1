@@ -38,6 +38,9 @@ class Simulator:
         news_filter: Optional[NewsFilter] = None,
         news_mode: str = "ignore",
         require_above_vwap_at_entry: bool = False,
+        news_relvol_bypass: float = 0.0,
+        news_tier_bypass: int = 0,
+        max_position_dv_pct: float = 0.0,
     ) -> None:
         self._config = config
         self._initial_equity = initial_equity
@@ -47,6 +50,9 @@ class Simulator:
         self._news_filter = news_filter
         self._news_mode = news_mode
         self._require_above_vwap_at_entry = require_above_vwap_at_entry
+        self._news_relvol_bypass = news_relvol_bypass
+        self._news_tier_bypass = news_tier_bypass
+        self._max_position_dv_pct = max_position_dv_pct
 
     def run_day(
         self,
@@ -60,16 +66,22 @@ class Simulator:
         manager = PositionManager(self._config)
         portfolio = PortfolioState(equity=self._initial_equity, config=self._config)
 
-        # Apply news filter: pre-screen symbols before bar loop (avoids per-bar API calls)
-        if self._news_filter is not None and self._news_mode != "ignore":
-            filtered: Dict[str, List[Bar]] = {}
-            for sym, bars in bars_by_symbol.items():
-                has_cat = self._news_filter.has_catalyst(sym, trade_date)
-                if self._news_mode == "require" and has_cat:
-                    filtered[sym] = bars
-                elif self._news_mode == "exclude" and not has_cat:
-                    filtered[sym] = bars
-            bars_by_symbol = filtered
+        # Pre-compute catalyst status for all symbols (avoids per-bar API calls).
+        # When bypass params are set, keep all symbols and gate at entry time;
+        # otherwise filter the symbol list here for efficiency.
+        catalyst_status: Dict[str, bool] = {}
+        _news_active = self._news_filter is not None and self._news_mode == "require"
+        _has_bypass   = self._news_relvol_bypass > 0 or self._news_tier_bypass > 0
+        if _news_active:
+            for sym in bars_by_symbol:
+                catalyst_status[sym] = self._news_filter.has_catalyst(sym, trade_date)  # type: ignore[union-attr]
+            if not _has_bypass:
+                bars_by_symbol = {s: b for s, b in bars_by_symbol.items() if catalyst_status[s]}
+        if self._news_filter is not None and self._news_mode == "exclude":
+            bars_by_symbol = {
+                s: b for s, b in bars_by_symbol.items()
+                if not self._news_filter.has_catalyst(s, trade_date)
+            }
 
         merged: List[Bar] = sorted(
             (b for bars in bars_by_symbol.values() for b in bars),
@@ -180,6 +192,18 @@ class Simulator:
             if validator.validate(bar, baseline):
                 if self._require_above_vwap_at_entry and (vwap_val is None or bar.close <= vwap_val):
                     continue
+                # News gate with optional bypass
+                if _news_active and not catalyst_status.get(sym, False):
+                    rel_vol = bar.volume / baseline if baseline > 0 else 0.0
+                    if self._news_relvol_bypass > 0 and rel_vol >= self._news_relvol_bypass:
+                        pass  # rel-vol bypass approved
+                    elif self._news_tier_bypass > 0:
+                        conf = validator.confidence_score(bar, baseline)
+                        mult_check = self._config.confidence_multiplier(conf)
+                        if mult_check < self._news_tier_bypass:
+                            continue  # insufficient tier — blocked
+                    else:
+                        continue  # no bypass — blocked
                 size = compute_position_size(portfolio.equity, atr_val, bar.close, self._config)
                 if size.shares > 0:
                     mult = self._config.confidence_multiplier(
@@ -188,6 +212,10 @@ class Simulator:
                     if mult > 1.0:
                         max_shares = int(portfolio.equity * self._config.max_position_pct / bar.close)
                         size.shares = min(int(size.shares * mult), max(0, max_shares))
+                    # Cap position to a fraction of avg daily dollar volume (liquidity guard)
+                    if self._max_position_dv_pct > 0 and baseline > 0:
+                        dv_cap = int(self._max_position_dv_pct * baseline * 390)
+                        size.shares = min(int(size.shares), dv_cap)
                     if self._market_order_fill:
                         # Market order: fill immediately at signal bar's close, no slippage.
                         # Matches live runner behaviour (market order submitted at bar close).
