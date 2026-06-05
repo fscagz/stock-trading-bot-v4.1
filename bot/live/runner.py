@@ -168,6 +168,8 @@ class LiveRunner:
         # --- IBKR bar cache (written to backtest cache at EOD) ---
         self._live_bar_cache: Dict[str, List[dict]] = {}
         self._bar_cache_dir = Path("backtest_results/cache")
+        if self._bar_cache_dir.exists() and not self._bar_cache_dir.is_dir():
+            self._bar_cache_dir.unlink()
         self._bar_cache_dir.mkdir(parents=True, exist_ok=True)
 
         self._stream: Optional[BarStream] = None
