@@ -66,6 +66,7 @@ def main() -> None:
             f"/{long_config.confidence_tier3_multiplier:.0f}×"
             f"/{long_config.confidence_tier4_multiplier:.0f}×"
         ),
+        "eod_evaluation": long_config.eod_evaluation,
         "risk_scale": args.risk_scale,
     }
 
