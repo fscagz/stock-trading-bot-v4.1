@@ -89,7 +89,7 @@ class MarketScanner:
         results = []
         for i in range(0, len(self._universe), _BATCH_SIZE):
             batch = self._universe[i:i + _BATCH_SIZE]
-            for attempt in range(4):
+            for attempt in range(5):
                 try:
                     resp = requests.get(
                         _SNAPSHOTS_URL,
@@ -100,7 +100,7 @@ class MarketScanner:
                     if resp.status_code == 429:
                         wait = 2 ** attempt
                         logger.warning(
-                            "Snapshot rate-limited (offset=%d) — retrying in %ds (attempt %d/4)",
+                            "Snapshot rate-limited (offset=%d) — retrying in %ds (attempt %d/5)",
                             i, wait, attempt + 1,
                         )
                         time.sleep(wait)
@@ -120,7 +120,7 @@ class MarketScanner:
                             })
                     break  # success — move to next batch
                 except Exception as exc:
-                    if attempt == 3:
+                    if attempt == 4:
                         logger.warning("Snapshot batch failed (offset=%d): %s", i, exc)
                     else:
                         time.sleep(2 ** attempt)
