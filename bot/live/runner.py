@@ -286,6 +286,8 @@ class LiveRunner:
 
         # Reset per-day state on the first bar of a new trading session
         if self._trading_date != today:
+            if self._trading_date is not None:
+                self._flush_bar_cache()   # write previous day's bars before clearing
             self._trading_date = today
             self._entered_today.clear()
             self._day_highs.clear()
