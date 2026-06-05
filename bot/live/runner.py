@@ -58,16 +58,18 @@ import bot.broker_alpaca as broker
 import bot.broker_ibkr as broker_ibkr
 from bot.backtest.news_filter import NewsFilter
 from bot.config import V4Config, make_long_config
+from bot.dashboard.state import DashboardState
 from bot.data.regime import RegimeFilter
 from bot.intraday.data.stream import BarStream
 from bot.intraday.indicators.atr import ATRIndicator
 from bot.intraday.indicators.vwap import VWAPIndicator
 from bot.intraday.risk.portfolio import PortfolioState
 from bot.intraday.risk.sizing import compute_position_size
-from bot.intraday.types import Bar, Position
+from bot.intraday.types import Bar, Position, TradeRecord
 from bot.live.state import SessionState
 from bot.momentum.validator import MomentumValidator
 from bot.positions.manager import PositionManager
+from bot.trade_logger import TradeLogger
 
 _ET = ZoneInfo("America/New_York")
 _ENTRY_START = dtime(9, 30)  # entries open from market open
@@ -100,6 +102,8 @@ class LiveRunner:
         equity: float,
         etb_set: Set[str],
         risk_scale: float = 1.0,
+        dash: Optional[DashboardState] = None,
+        trade_log_dir: str = "logs",
     ) -> None:
         if risk_scale != 1.0:
             for cfg in (short_config, long_config):
@@ -127,6 +131,9 @@ class LiveRunner:
         self._news_filter = NewsFilter(api_key, secret_key, cache_only=False)
         self._regime_filter = RegimeFilter()
         self._regime: dict = {"date": None, "uptrend": True}  # re-evaluated each trading day
+        self._dash = dash
+        self._trade_logger = TradeLogger(log_dir=trade_log_dir)
+        self._open_records: Dict[str, TradeRecord] = {}
 
         # --- Independent heat budgets (event loop thread owned) ---
         # Both portfolios share the same equity value, synced via _sync_equity().
@@ -167,6 +174,26 @@ class LiveRunner:
         """Propagate an equity change to both portfolio states."""
         self._short_portfolio.equity = new_equity
         self._long_portfolio.equity = new_equity
+
+    def _sync_dash(self, closed_record: Optional[TradeRecord] = None) -> None:
+        if self._dash is None:
+            return
+        with self._dash._lock:
+            self._dash.equity = self._equity
+            self._dash.positions = {
+                **self._short_portfolio.positions,
+                **self._long_portfolio.positions,
+            }
+            # Use long portfolio for heat/kill-switch (shorts are disabled)
+            lp = self._long_portfolio
+            self._dash.portfolio_heat_pct = lp.portfolio_heat_pct
+            self._dash.kill_switch_active = lp.kill_switch_active
+            self._dash.consecutive_losses = lp.consecutive_losses
+            self._dash.cooldown_until = lp.cooldown_until
+            self._dash.regime_uptrend = self._regime["uptrend"]
+            self._dash.regime_date = self._regime["date"]
+            if closed_record is not None:
+                self._dash.closed_trades.append(closed_record)
 
     @property
     def _equity(self) -> float:
@@ -264,6 +291,9 @@ class LiveRunner:
         atr_val = atr_ind.update(bar)
         vwap_val = vwap_ind.update(bar)
         self._last_prices[sym] = bar.close
+        if self._dash is not None:
+            with self._dash._lock:
+                self._dash.last_prices[sym] = bar.close
         with self._baseline_vols_lock:
             baseline = self._baseline_vols.get(sym, 0.0)
 
@@ -338,6 +368,7 @@ class LiveRunner:
                 logger.info("REGIME %s: SPY uptrend — long entries enabled", today)
             else:
                 logger.info("REGIME %s: SPY below 20-day MA — long entries blocked", today)
+            self._sync_dash()
 
         # --- Long entry (independent heat budget) ---
         if self._regime["uptrend"] and bar.close >= self._long_cfg.stage1_min_price:
@@ -404,6 +435,15 @@ class LiveRunner:
         )
         self._submit_broker_stop(sym, position)
         self._state.save_position(position)
+        self._open_records[sym] = TradeRecord(
+            ticker=sym, direction="short", entry_time=bar.timestamp,
+            entry_price=fill_est, shares=size.shares,
+            stop_price=position.stop_price, target_price=position.target_price,
+            signals=["momentum_short"], sector="Unknown", regime="",
+            portfolio_heat_at_entry=self._short_portfolio.portfolio_heat_pct,
+            expected_slippage_pct=0.0,
+        )
+        self._sync_dash()
 
     def _enter_long(self, sym: str, bar: Bar, atr_val: float, baseline: float) -> None:
         cfg = self._long_cfg
@@ -460,6 +500,15 @@ class LiveRunner:
         )
         self._submit_broker_stop(sym, position)
         self._state.save_position(position)
+        self._open_records[sym] = TradeRecord(
+            ticker=sym, direction="long", entry_time=bar.timestamp,
+            entry_price=fill_est, shares=size.shares,
+            stop_price=position.stop_price, target_price=position.target_price,
+            signals=["momentum_long"], sector="Unknown", regime="",
+            portfolio_heat_at_entry=self._long_portfolio.portfolio_heat_pct,
+            expected_slippage_pct=0.0,
+        )
+        self._sync_dash()
 
     def _execute_close(self, sym: str, fill_price: float, reason: str, portfolio: PortfolioState) -> None:
         with self._close_lock:
@@ -480,6 +529,7 @@ class LiveRunner:
         # Returns False if Alpaca already filled the stop (broker covered/sold for us).
         need_to_cover = self._cancel_broker_stop(sym, position)
 
+        closed_record: Optional[TradeRecord] = None
         if need_to_cover:
             try:
                 order_id = broker.buy_to_cover(sym, position.shares) if is_short else broker.sell(sym, position.shares)
@@ -497,6 +547,7 @@ class LiveRunner:
                 with self._open_syms_lock:
                     self._open_syms.add(sym)
                 logger.error("Exit order failed for %s: %s — position restored", sym, exc)
+                return
         else:
             self._state.remove_position(sym)
             action = "COVERED" if is_short else "SOLD"
@@ -504,6 +555,16 @@ class LiveRunner:
                 "%s by broker stop %s x%d pnl≈%.2f reason=%s equity≈%.2f",
                 action, sym, position.shares, pnl, reason, self._equity,
             )
+
+        record = self._open_records.pop(sym, None)
+        if record is not None:
+            record.exit_time = datetime.now(_ET)
+            record.exit_price = fill_price
+            record.pnl = pnl
+            record.exit_reason = reason
+            self._trade_logger.log(record)
+            closed_record = record
+        self._sync_dash(closed_record=closed_record)
 
     # ------------------------------------------------------------------
     # Startup reconciliation
@@ -879,6 +940,11 @@ class LiveRunner:
 
         self._stream = BarStream(self._ibkr_host, self._ibkr_port, self._ibkr_client_id, list(all_initial))
         self._stream.set_handler(self._on_bar)
+
+        if self._dash is not None:
+            from bot.dashboard.server import start_server
+            self._sync_dash()
+            start_server(self._dash)
 
         for name, target in [
             ("watchlist-refresh", self._refresh_watchlist_loop),
