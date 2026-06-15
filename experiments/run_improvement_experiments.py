@@ -21,13 +21,15 @@ import copy, os, sys, warnings, logging
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date, timedelta
 from pathlib import Path
+import sys
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from typing import Dict, List
 
 warnings.filterwarnings("ignore")
 logging.basicConfig(level=logging.WARNING)
 
 from dotenv import load_dotenv
-load_dotenv(Path(__file__).resolve().parent / ".env", override=True)
+load_dotenv(Path(__file__).resolve().parent.parent / ".env", override=True)
 
 import pandas as pd
 import bot.broker_alpaca as broker
@@ -35,7 +37,7 @@ from bot.backtest.backtest_metrics import compute_metrics
 from bot.backtest.bar_fetcher import BarFetcher
 from bot.backtest.candidate_screener import CandidateScreener
 from bot.backtest.simulator import Simulator
-from bot.config import make_long_config
+from bot.config import make_gap_hold_config
 from bot.data.daily_loader import get_daily
 from bot.intraday.types import TradeRecord
 
@@ -155,7 +157,7 @@ def main():
         # Load screener once per period (baseline config — no min DV).
         # For min-DV experiments we pass a different config to the screener
         # so it can rebuild the candidates index.
-        base_cfg = make_long_config()
+        base_cfg = make_gap_hold_config()
         screener_base = CandidateScreener(copy.copy(base_cfg), api_key, secret_key, base_url)
         print(f"  Loading daily data for {period_label}...", flush=True)
         screener_base.preload(start, end)

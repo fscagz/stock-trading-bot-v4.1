@@ -5,7 +5,7 @@ Pre-loads bar data ONCE per period, then runs all experiments on the cached data
 This avoids re-reading files per-experiment for ~9x speedup.
 
 Experiments:
-  E0  Baseline long (make_long_config, news=require)
+  E0  Baseline long (make_gap_hold_config, news=require)
   E1  Long + SPY regime skip (0× risk / skip longs when SPY below 20-day MA)
   E2  Long + SPY regime half (0.5× risk in downtrend)
   E3  Long + min_spike_age=5
@@ -25,13 +25,15 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import date, timedelta
 from pathlib import Path
+import sys
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from typing import Dict, List, Optional, Tuple
 
 warnings.filterwarnings("ignore")
 logging.basicConfig(level=logging.WARNING)
 
 from dotenv import load_dotenv
-load_dotenv(Path(__file__).resolve().parent / ".env", override=True)
+load_dotenv(Path(__file__).resolve().parent.parent / ".env", override=True)
 
 import pandas as pd
 import bot.broker_alpaca as broker
@@ -40,7 +42,7 @@ from bot.backtest.bar_fetcher import BarFetcher
 from bot.backtest.candidate_screener import CandidateScreener
 from bot.backtest.news_filter import NewsFilter
 from bot.backtest.simulator import Simulator
-from bot.config import V4Config, make_long_config, make_short_config
+from bot.config import V4Config, make_gap_hold_config, make_short_config
 from bot.data.daily_loader import get_daily
 from bot.intraday.types import Bar, TradeRecord
 
@@ -250,7 +252,7 @@ def main() -> None:
     initial_equity = account["portfolio_value"]
     print(f"Initial equity: ${initial_equity:,.2f}")
 
-    long_cfg = make_long_config()
+    long_cfg = make_gap_hold_config()
     short_cfg = make_short_config()
     base_short_cfg = V4Config()
 

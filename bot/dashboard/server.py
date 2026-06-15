@@ -38,11 +38,14 @@ def create_app(state: DashboardState) -> FastAPI:
             positions = []
             for ticker, pos in state.positions.items():
                 last_price = state.last_prices.get(ticker, pos.entry_price)
-                unrealized = round(
-                    (last_price - pos.entry_price) * pos.shares, 2
-                )
+                is_short = getattr(pos, "direction", "long") == "short"
+                if is_short:
+                    unrealized = round((pos.entry_price - last_price) * pos.shares, 2)
+                else:
+                    unrealized = round((last_price - pos.entry_price) * pos.shares, 2)
                 positions.append({
                     "ticker": ticker,
+                    "direction": getattr(pos, "direction", "long"),
                     "shares": pos.shares,
                     "entry_price": pos.entry_price,
                     "stop_price": pos.stop_price,
@@ -79,6 +82,8 @@ def create_app(state: DashboardState) -> FastAPI:
             max_heat = state.config_snapshot.get("max_portfolio_heat", 0.24)
             max_pos = state.config_snapshot.get("max_open_positions", 15)
 
+            short_max_heat = state.short_config_snapshot.get("max_portfolio_heat", 0.06)
+
             return {
                 "equity": round(state.equity, 2),
                 "cash": round(state.cash, 2),
@@ -97,6 +102,12 @@ def create_app(state: DashboardState) -> FastAPI:
                 "positions": positions,
                 "closed_trades": closed,
                 "config": state.config_snapshot,
+                "long_strategy_name": state.long_strategy_name,
+                "short_enabled": state.short_enabled,
+                "short_allowed": state.short_allowed,
+                "short_heat_pct": round(state.short_heat_pct, 4),
+                "short_max_heat": short_max_heat,
+                "short_config": state.short_config_snapshot,
             }
 
     return app

@@ -1,5 +1,6 @@
 from __future__ import annotations
 import logging
+import os
 import pickle
 import re
 from datetime import date, timedelta
@@ -48,7 +49,7 @@ class CandidateScreener:
         Slow path: download from Yahoo Finance in batches.
         """
         if self._universe is None:
-            self._universe = self._load_universe()
+            self._universe = self._load_universe(as_of=start)
 
         fetch_start = start - timedelta(days=10)
         pkl = self._find_pkl(fetch_start, end)
@@ -110,7 +111,9 @@ class CandidateScreener:
         index: Dict[date, List[str]] = {d: [] for d in days}
 
         # First pass: collect (pct_change, sym) per day so we can apply the
-        # top-200 cap that mirrors the live bot's IBKR scanner (top_n=200).
+        # top-N cap that mirrors the live bot's IBKR scanner.
+        # config.scanner_top_n (default 50) matches the live IBKR limit.
+        top_n = int(getattr(self._config, "scanner_top_n", 50))
         day_scored: Dict[date, list] = {d: [] for d in days}
 
         for sym, df in self._daily_cache.items():
@@ -127,11 +130,11 @@ class CandidateScreener:
                 if ts in day_set:
                     day_scored[ts.date()].append((float(pct_chg.loc[ts]), sym))
 
-        # Second pass: sort descending by % gain and cap at 200 — mirrors
-        # IBKR scanner TOP_PERC_GAIN with numberOfRows=200.
+        # Second pass: sort descending by % gain and cap at top_n — mirrors
+        # IBKR scanner TOP_PERC_GAIN with numberOfRows=top_n.
         for d, scored in day_scored.items():
             scored.sort(reverse=True)
-            index[d] = [sym for _, sym in scored[:200]]
+            index[d] = [sym for _, sym in scored[:top_n]]
 
         self._candidates_index = index
         logger.info("CandidateScreener: index built — %d days, avg %.0f candidates/day",
@@ -194,7 +197,7 @@ class CandidateScreener:
 
         # Slow path: on-demand compute (single-day mode or preload not called)
         if self._universe is None:
-            self._universe = self._load_universe()
+            self._universe = self._load_universe(as_of=trade_date)
         if not self._universe:
             return []
 
@@ -231,7 +234,34 @@ class CandidateScreener:
         logger.info("CandidateScreener: %d candidates for %s", len(candidates), trade_date)
         return candidates
 
-    def _load_universe(self) -> List[str]:
+    def _load_universe(self, as_of: Optional[date] = None) -> List[str]:
+        # Opt-in EODHD path: point-in-time S&P 500 universe (no survivorship bias).
+        # Set EODHD_API_KEY=<key> in .env to enable.
+        eodhd_key = os.getenv("EODHD_API_KEY", "")
+        if eodhd_key and as_of is not None:
+            try:
+                from bot.data.universe_eodhd import load_sp500_constituents_as_of
+                symbols = load_sp500_constituents_as_of(as_of, api_key=eodhd_key)
+                logger.info(
+                    "CandidateScreener: EODHD point-in-time universe for %s — %d S&P 500 symbols",
+                    as_of, len(symbols),
+                )
+                return symbols
+            except Exception as exc:
+                logger.warning(
+                    "CandidateScreener: EODHD universe failed (%s) — falling back to Alpaca", exc,
+                )
+
+        # Fallback: currently-active Alpaca assets.
+        # NOTE: survivorship bias — delisted tickers from the backtest period are absent.
+        # Set EODHD_API_KEY in .env for a bias-free historical universe.
+        if as_of is not None:
+            logger.warning(
+                "CandidateScreener: loading Alpaca's current active universe for historical "
+                "backtest starting %s — survivorship bias present (delisted tickers excluded). "
+                "Set EODHD_API_KEY in .env to use point-in-time S&P 500 constituents.",
+                as_of,
+            )
         try:
             resp = requests.get(
                 self._assets_url,

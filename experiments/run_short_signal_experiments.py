@@ -9,10 +9,12 @@ import logging
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, timedelta
 from pathlib import Path
+import sys
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from typing import List, Dict
 
 from dotenv import load_dotenv
-load_dotenv(Path(__file__).resolve().parent / ".env", override=True)
+load_dotenv(Path(__file__).resolve().parent.parent / ".env", override=True)
 
 import bot.broker_alpaca as broker
 from bot.backtest.backtest_metrics import compute_metrics

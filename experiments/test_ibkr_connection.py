@@ -12,7 +12,7 @@ from zoneinfo import ZoneInfo
 from dotenv import load_dotenv
 from ib_insync import IB, Stock
 
-load_dotenv(Path(__file__).resolve().parent / ".env")
+load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 
 _ET = ZoneInfo("America/New_York")
 HOST = os.getenv("IBKR_HOST", "127.0.0.1")

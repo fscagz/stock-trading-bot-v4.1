@@ -16,6 +16,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       --green: #34d399;
       --red: #f87171;
       --yellow: #facc15;
+      --orange: #fb923c;
     }
     * { box-sizing: border-box; margin: 0; padding: 0; }
     body {
@@ -50,12 +51,17 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       padding: 3px 10px; border-radius: 20px;
       border: 1px solid transparent;
     }
-    .badge-paper  { background: rgba(34,211,238,0.10); color: var(--cyan);   border-color: rgba(34,211,238,0.20); }
-    .badge-live   { background: rgba(250,204,21,0.10);  color: var(--yellow); border-color: rgba(250,204,21,0.20); }
-    .badge-up     { background: rgba(52,211,153,0.10);  color: var(--green);  border-color: rgba(52,211,153,0.20); }
-    .badge-down   { background: rgba(248,113,113,0.10); color: var(--red);    border-color: rgba(248,113,113,0.20); }
-    .badge-active { background: rgba(52,211,153,0.10);  color: var(--green);  border-color: rgba(52,211,153,0.20); }
-    .badge-halted { background: rgba(248,113,113,0.10); color: var(--red);    border-color: rgba(248,113,113,0.20); }
+    .badge-paper    { background: rgba(34,211,238,0.10);  color: var(--cyan);   border-color: rgba(34,211,238,0.20); }
+    .badge-live     { background: rgba(250,204,21,0.10);   color: var(--yellow); border-color: rgba(250,204,21,0.20); }
+    .badge-up       { background: rgba(52,211,153,0.10);   color: var(--green);  border-color: rgba(52,211,153,0.20); }
+    .badge-down     { background: rgba(248,113,113,0.10);  color: var(--red);    border-color: rgba(248,113,113,0.20); }
+    .badge-active   { background: rgba(52,211,153,0.10);   color: var(--green);  border-color: rgba(52,211,153,0.20); }
+    .badge-halted   { background: rgba(248,113,113,0.10);  color: var(--red);    border-color: rgba(248,113,113,0.20); }
+    .badge-short-on { background: rgba(251,146,60,0.12);   color: var(--orange); border-color: rgba(251,146,60,0.25); }
+    .badge-short-ok { background: rgba(52,211,153,0.10);   color: var(--green);  border-color: rgba(52,211,153,0.20); }
+    .badge-short-blocked { background: rgba(250,204,21,0.10); color: var(--yellow); border-color: rgba(250,204,21,0.20); }
+    .badge-short-off{ background: rgba(255,255,255,0.05);  color: var(--muted);  border-color: rgba(255,255,255,0.10); }
+    .badge-strategy { background: rgba(34,211,238,0.07);   color: var(--cyan);   border-color: rgba(34,211,238,0.15); }
 
     /* ── Body layout ────────────────────────────────────────── */
     #body {
@@ -82,6 +88,16 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       letter-spacing: 1px;
       margin-bottom: 12px;
     }
+    .panel-subtitle {
+      color: var(--muted);
+      font-size: 10px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.8px;
+      margin: 12px 0 8px;
+      padding-top: 10px;
+      border-top: 1px solid var(--border);
+    }
 
     /* ── Tables ─────────────────────────────────────────────── */
     table { width: 100%; border-collapse: collapse; }
@@ -95,8 +111,13 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     tr:last-child td { border-bottom: none; }
     .g { color: var(--green); font-weight: 600; }
     .r { color: var(--red);   font-weight: 600; }
+    .o { color: var(--orange); font-weight: 600; }
     .m { color: var(--muted); }
     .empty-msg { color: var(--muted); font-size: 11px; text-align: center; padding: 20px 0; }
+
+    /* Direction pill in position table */
+    .dir-long  { background: rgba(52,211,153,0.12); color: var(--green);  padding: 1px 7px; border-radius: 10px; font-size: 10px; font-weight: 700; }
+    .dir-short { background: rgba(251,146,60,0.12);  color: var(--orange); padding: 1px 7px; border-radius: 10px; font-size: 10px; font-weight: 700; }
 
     /* ── Sidebar KV pairs ───────────────────────────────────── */
     .kv { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
@@ -104,9 +125,10 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     .k { color: var(--muted); font-size: 11px; }
     .v { font-size: 12px; font-weight: 600; }
 
-    /* ── Heat progress bar ──────────────────────────────────── */
+    /* ── Heat progress bars ─────────────────────────────────── */
     .progress-wrap { background: rgba(255,255,255,0.06); border-radius: 4px; height: 4px; margin: -2px 0 10px; }
     .progress-fill { border-radius: 4px; height: 4px; background: linear-gradient(90deg, var(--cyan), var(--green)); transition: width 0.5s; }
+    .progress-fill-short { border-radius: 4px; height: 4px; background: linear-gradient(90deg, var(--orange), var(--yellow)); transition: width 0.5s; }
 
     /* ── Chart ──────────────────────────────────────────────── */
     #pnl-chart-wrap { height: 130px; position: relative; }
@@ -120,9 +142,11 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   <div class="stat"><div class="lbl">Cash</div><div class="val" id="h-cash">—</div></div>
   <div class="stat"><div class="lbl">Day P&amp;L</div><div class="val" id="h-pnl">—</div></div>
   <div class="badges">
-    <span class="badge badge-paper" id="b-env">PAPER</span>
-    <span class="badge badge-up"    id="b-regime">&#8593; UPTREND</span>
-    <span class="badge badge-active" id="b-kill">&#10003; ACTIVE</span>
+    <span class="badge badge-paper"    id="b-env">PAPER</span>
+    <span class="badge badge-strategy" id="b-strategy">GAP-HOLD</span>
+    <span class="badge badge-up"       id="b-regime">&#8593; UPTREND</span>
+    <span class="badge badge-short-off" id="b-shorts">SHORTS OFF</span>
+    <span class="badge badge-active"   id="b-kill">&#10003; ACTIVE</span>
   </div>
 </div>
 
@@ -139,12 +163,12 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       <table>
         <thead>
           <tr>
-            <th>Ticker</th><th>Shares</th><th>Entry</th><th>Stop</th>
+            <th>Ticker</th><th>Dir</th><th>Shares</th><th>Entry</th><th>Stop</th>
             <th>Target</th><th>Last</th><th>Unreal. P&amp;L</th><th>Risk</th><th>Time In</th>
           </tr>
         </thead>
         <tbody id="positions-body">
-          <tr><td colspan="9" class="empty-msg">No open positions</td></tr>
+          <tr><td colspan="10" class="empty-msg">No open positions</td></tr>
         </tbody>
       </table>
     </div>
@@ -169,8 +193,19 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 
     <div class="panel">
       <div class="panel-title">Portfolio Risk</div>
-      <div class="kv"><span class="k">Heat</span><span class="v" id="s-heat">—</span></div>
+
+      <div class="kv" style="margin-bottom:4px">
+        <span class="k">Long Heat</span><span class="v" id="s-heat">—</span>
+      </div>
       <div class="progress-wrap"><div class="progress-fill" id="heat-bar" style="width:0%"></div></div>
+
+      <div id="short-heat-row" style="display:none">
+        <div class="kv" style="margin-bottom:4px">
+          <span class="k">Short Heat</span><span class="v" id="s-short-heat">—</span>
+        </div>
+        <div class="progress-wrap"><div class="progress-fill-short" id="short-heat-bar" style="width:0%"></div></div>
+      </div>
+
       <div class="kv"><span class="k">Positions</span><span class="v" id="s-pos">—</span></div>
       <div class="kv"><span class="k">Consec. Losses</span><span class="v" id="s-losses">—</span></div>
       <div class="kv"><span class="k">Cooldown</span><span class="v m" id="s-cooldown">—</span></div>
@@ -237,6 +272,11 @@ function timeIn(iso) {
   return mins < 60 ? mins + 'm' : Math.floor(mins / 60) + 'h ' + (mins % 60) + 'm';
 }
 function signOf(n) { return n >= 0 ? '+' : '-'; }
+function dirPill(d) {
+  return d === 'short'
+    ? '<span class="dir-short">SHORT</span>'
+    : '<span class="dir-long">LONG</span>';
+}
 
 // ── Updaters ─────────────────────────────────────────────────
 function updateHeader(d) {
@@ -252,9 +292,25 @@ function updateHeader(d) {
   bEnv.textContent = d.is_paper ? 'PAPER' : 'LIVE';
   bEnv.className = 'badge ' + (d.is_paper ? 'badge-paper' : 'badge-live');
 
+  var bStrat = document.getElementById('b-strategy');
+  var stratName = d.long_strategy_name === 'gap_hold' ? 'GAP-HOLD' : 'STANDARD';
+  bStrat.textContent = stratName;
+
   var bReg = document.getElementById('b-regime');
-  bReg.innerHTML = d.regime_uptrend ? '&#8593; UPTREND' : '&#8595; BLOCKED';
+  bReg.innerHTML = d.regime_uptrend ? '&#8593; UPTREND' : '&#8595; LONGS BLOCKED';
   bReg.className = 'badge ' + (d.regime_uptrend ? 'badge-up' : 'badge-down');
+
+  var bShorts = document.getElementById('b-shorts');
+  if (!d.short_enabled) {
+    bShorts.textContent = 'SHORTS OFF';
+    bShorts.className = 'badge badge-short-off';
+  } else if (d.short_allowed) {
+    bShorts.innerHTML = '&#8595; SHORTS OK';
+    bShorts.className = 'badge badge-short-ok';
+  } else {
+    bShorts.innerHTML = '&#8856; SHORTS BLOCKED';
+    bShorts.className = 'badge badge-short-blocked';
+  }
 
   var bKill = document.getElementById('b-kill');
   bKill.innerHTML = d.kill_switch_active ? '&#10007; HALTED' : '&#10003; ACTIVE';
@@ -265,19 +321,23 @@ function updatePositions(d) {
   document.getElementById('pos-count').textContent = d.open_positions_count;
   var tbody = document.getElementById('positions-body');
   if (!d.positions.length) {
-    tbody.innerHTML = '<tr><td colspan="9" class="empty-msg">No open positions</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="10" class="empty-msg">No open positions</td></tr>';
     return;
   }
   tbody.innerHTML = d.positions.map(function(p) {
-    var cls = p.unrealized_pnl >= 0 ? 'g' : 'r';
+    var isShort = p.direction === 'short';
+    var pnlCls = isShort
+      ? (p.unrealized_pnl >= 0 ? 'g' : 'r')
+      : (p.unrealized_pnl >= 0 ? 'g' : 'r');
     return '<tr>' +
       '<td><strong>' + p.ticker + '</strong></td>' +
+      '<td>' + dirPill(p.direction) + '</td>' +
       '<td>' + p.shares + '</td>' +
       '<td>$' + fmt2(p.entry_price) + '</td>' +
       '<td>$' + fmt2(p.stop_price) + '</td>' +
       '<td>$' + fmt2(p.target_price) + '</td>' +
       '<td>$' + fmt2(p.last_price) + '</td>' +
-      '<td class="' + cls + '">' + signOf(p.unrealized_pnl) + '$' + fmt2(p.unrealized_pnl) + '</td>' +
+      '<td class="' + pnlCls + '">' + signOf(p.unrealized_pnl) + '$' + fmt2(p.unrealized_pnl) + '</td>' +
       '<td class="m">$' + fmt2(p.open_risk) + '</td>' +
       '<td class="m">' + timeIn(p.entry_time) + '</td>' +
       '</tr>';
@@ -296,7 +356,7 @@ function updateTrades(d) {
     return '<tr>' +
       '<td class="m">' + timeFmt(t.exit_time) + '</td>' +
       '<td><strong>' + t.ticker + '</strong></td>' +
-      '<td class="m">' + t.direction + '</td>' +
+      '<td>' + dirPill(t.direction) + '</td>' +
       '<td>$' + fmt2(t.entry_price) + '</td>' +
       '<td>$' + fmt2(t.exit_price) + '</td>' +
       '<td>' + t.shares + '</td>' +
@@ -328,10 +388,23 @@ function updateChart(d) {
 
 function updateRisk(d) {
   var hPct = (d.portfolio_heat_pct * 100).toFixed(1);
-  var maxPct = (d.max_portfolio_heat * 100).toFixed(1);
+  var maxPct = (d.max_portfolio_heat * 100).toFixed(0);
   document.getElementById('s-heat').textContent = hPct + '% / ' + maxPct + '%';
   var fill = Math.min((d.portfolio_heat_pct / (d.max_portfolio_heat || 1)) * 100, 100);
   document.getElementById('heat-bar').style.width = fill + '%';
+
+  var shortRow = document.getElementById('short-heat-row');
+  if (d.short_enabled) {
+    shortRow.style.display = 'block';
+    var shPct = (d.short_heat_pct * 100).toFixed(1);
+    var shMax = (d.short_max_heat * 100).toFixed(0);
+    document.getElementById('s-short-heat').textContent = shPct + '% / ' + shMax + '%';
+    var sFill = Math.min((d.short_heat_pct / (d.short_max_heat || 1)) * 100, 100);
+    document.getElementById('short-heat-bar').style.width = sFill + '%';
+  } else {
+    shortRow.style.display = 'none';
+  }
+
   document.getElementById('s-pos').textContent = d.open_positions_count + ' / ' + d.max_open_positions;
   document.getElementById('s-losses').textContent = d.consecutive_losses;
 
@@ -349,7 +422,9 @@ function updateRisk(d) {
 function updateConfig(d) {
   var c = d.config;
   if (!c || !Object.keys(c).length) return;
+  var stratLabel = d.long_strategy_name === 'gap_hold' ? 'Gap-Hold' : 'Standard';
   var rows = [
+    ['Strategy', stratLabel],
     ['Risk/Trade', (c.risk_per_trade * 100).toFixed(1) + '%'],
     ['Max Heat', (c.max_portfolio_heat * 100).toFixed(0) + '%'],
     ['Min RelVol', c.stage2_min_relative_volume + '×'],
@@ -358,9 +433,29 @@ function updateConfig(d) {
     ['EOD Exit', c.eod_evaluation],
     ['Conf. Tiers', c.confidence_tiers],
   ];
-  document.getElementById('config-body').innerHTML = rows.map(function(row) {
+  var html = rows.map(function(row) {
     return '<div class="kv"><span class="k">' + row[0] + '</span><span class="v">' + row[1] + '</span></div>';
   }).join('');
+
+  if (d.short_enabled && d.short_config && Object.keys(d.short_config).length) {
+    var sc = d.short_config;
+    var shortRows = [
+      ['Strategy', sc.strategy || 'HOD Rejection'],
+      ['Min Run', sc.min_run_pct || '—'],
+      ['Rejection', sc.rejection_bars || '—'],
+      ['Stop/Target', sc.stop_target || '—'],
+      ['Regime', sc.regime_filter || '—'],
+      ['Risk/Trade', sc.risk_per_trade != null ? (sc.risk_per_trade * 100).toFixed(1) + '%' : '—'],
+      ['Max Heat', sc.max_portfolio_heat != null ? (sc.max_portfolio_heat * 100).toFixed(0) + '%' : '—'],
+      ['Min $Vol', sc.min_dollar_vol != null ? '$' + (sc.min_dollar_vol / 1e6).toFixed(0) + 'M' : '—'],
+    ];
+    html += '<div class="panel-subtitle">Short Strategy</div>';
+    html += shortRows.map(function(row) {
+      return '<div class="kv"><span class="k">' + row[0] + '</span><span class="v">' + row[1] + '</span></div>';
+    }).join('');
+  }
+
+  document.getElementById('config-body').innerHTML = html;
 }
 
 // ── Poll loop ────────────────────────────────────────────────

@@ -11,13 +11,15 @@ from collections import Counter, defaultdict
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date, timedelta
 from pathlib import Path
+import sys
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from typing import Dict, List
 
 warnings.filterwarnings("ignore")
 logging.basicConfig(level=logging.WARNING)
 
 from dotenv import load_dotenv
-load_dotenv(Path(__file__).resolve().parent / ".env", override=True)
+load_dotenv(Path(__file__).resolve().parent.parent / ".env", override=True)
 
 import pandas as pd
 import bot.broker_alpaca as broker
@@ -25,7 +27,7 @@ from bot.backtest.backtest_metrics import compute_metrics
 from bot.backtest.bar_fetcher import BarFetcher
 from bot.backtest.candidate_screener import CandidateScreener
 from bot.backtest.simulator import Simulator
-from bot.config import make_long_config
+from bot.config import make_gap_hold_config
 from bot.data.daily_loader import get_daily
 from bot.intraday.types import TradeRecord
 from bot.momentum.validator import MomentumValidator
@@ -132,7 +134,7 @@ def run_with_tier_tracking(cfg, days, screener, fetcher, eq):
 
 def make_old_config():
     """Pre-change config: 1x/2x/4x/8x, roc=3x, vol=3x, no min DV."""
-    cfg = make_long_config()
+    cfg = make_gap_hold_config()
     cfg.confidence_tier1_multiplier = 1.0
     cfg.confidence_tier2_multiplier = 2.0
     cfg.confidence_tier3_multiplier = 4.0
@@ -157,7 +159,7 @@ def main():
         print(f"{'='*90}")
 
         old_cfg = make_old_config()
-        new_cfg = make_long_config()  # uses the updated make_long_config
+        new_cfg = make_gap_hold_config()  # uses the updated make_gap_hold_config
 
         # Load screeners
         scr_old = CandidateScreener(copy.copy(old_cfg), api_key, secret_key, base_url)

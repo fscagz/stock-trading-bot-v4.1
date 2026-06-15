@@ -45,6 +45,13 @@ class PositionManager:
             if new_stop > position.stop_price:
                 position.stop_price = new_stop
 
+        # Break-even stop: once profit >= trigger multiple of ATR, floor stop at entry
+        be_trigger = getattr(self._cfg, "breakeven_trigger_atr_multiple", 0.0)
+        if be_trigger > 0 and position.atr_at_entry > 0:
+            if bar.close >= position.entry_price + be_trigger * position.atr_at_entry:
+                if position.stop_price < position.entry_price:
+                    position.stop_price = position.entry_price
+
         if bar.close <= position.stop_price:
             return ExitInstruction(reason="trailing_stop", action="market_exit")
 

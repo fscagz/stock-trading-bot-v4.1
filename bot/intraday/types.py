@@ -75,6 +75,8 @@ class TradeRecord:
     pnl: Optional[float] = None
     exit_reason: Optional[str] = None   # "stop" | "target" | "eod_close" | "kill_switch"
     ml_score: Optional[float] = None
+    mfe_pct: Optional[float] = None     # max favorable excursion % from entry
+    mae_pct: Optional[float] = None     # max adverse excursion % from entry (negative = adverse)
 
     @property
     def is_closed(self) -> bool:

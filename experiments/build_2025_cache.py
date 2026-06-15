@@ -1,12 +1,11 @@
 """
-Build 2022 bar cache using Alpaca SIP feed.
-IEX data doesn't cover 2022; SIP has full coverage back to 2016.
+Build 2025-26 bar cache using Alpaca SIP feed.
 
 Steps:
-  1. Delete existing 2022 screener preload (built with iex, too sparse).
-  2. Rebuild screener preload for 2021-11-29..2022-12-31 using sip feed.
-  3. For each 2022 trading day, find candidates (15%+ intraday, $250k avg vol).
-  4. Fetch 1-min bars from Alpaca sip for any uncached candidate/date pair.
+  1. Delete existing 2025-26 screener preload (built with yfinance, unreliable).
+  2. Rebuild screener preload for 2024-11-28..2026-05-30 using SIP feed.
+  3. For each trading day in range, find candidates (15%+ intraday, $250k avg vol).
+  4. Fetch 1-min bars from Alpaca SIP for any uncached candidate/date pair.
 """
 from __future__ import annotations
 import json
@@ -25,7 +24,7 @@ import pandas as pd
 import requests
 from dotenv import load_dotenv
 
-load_dotenv(Path(__file__).resolve().parent / ".env", override=True)
+load_dotenv(Path(__file__).resolve().parent.parent / ".env", override=True)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
@@ -39,12 +38,12 @@ _SCREENER_CACHE_DIR = Path("screener_cache")
 _BAR_CACHE_DIR = Path("backtest_results/cache")
 _BATCH_SIZE = 100
 
-START = date(2022, 1, 3)
-END = date(2022, 12, 30)
-PRELOAD_START = date(2021, 11, 29)  # 35-day buffer before 2022
-PRELOAD_END = date(2023, 1, 1)
+START = date(2025, 1, 2)
+END = date(2026, 5, 29)
+PRELOAD_START = date(2024, 11, 28)  # 35-day buffer before 2025
+PRELOAD_END = date(2026, 6, 1)
 
-# Long strategy thresholds (matches make_long_config exactly)
+# Long strategy thresholds (matches make_gap_hold_config exactly)
 STAGE1_MIN_PCT_CHANGE = 0.15
 STAGE1_MIN_PRICE = 2.00
 MIN_AVG_DOLLAR_VOLUME = 0  # cache all candidates; CandidateScreener applies the $500k DV filter at runtime
@@ -140,14 +139,14 @@ def fetch_daily_sip(symbols: List[str], start: str, end: str) -> Dict[str, pd.Da
 
 
 def build_screener_preload(universe: List[str]) -> Dict[str, pd.DataFrame]:
-    """Rebuild the 2022 screener preload using SIP daily bars."""
+    """Rebuild the 2025-26 screener preload using SIP daily bars."""
     preload_key = f"{PRELOAD_START}_{PRELOAD_END}"
     pkl_path = _SCREENER_CACHE_DIR / f"{preload_key}.pkl"
     _SCREENER_CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
     # Always rebuild for 2022 to ensure sip data
     if pkl_path.exists():
-        logger.info("Removing existing 2022 screener preload to rebuild with SIP feed...")
+        logger.info("Removing existing screener preload to rebuild with SIP feed...")
         pkl_path.unlink()
 
     logger.info("Building screener preload for %s..%s using SIP feed (%d symbols)",
@@ -251,7 +250,7 @@ def main():
 
     logger.info("=== Step 3: Identify 2022 candidates and fetch intraday bars ===")
     days = trading_days(START, END)
-    logger.info("Processing %d trading days in 2022", len(days))
+    logger.info("Processing %d trading days in 2025-26", len(days))
 
     total_fetched = 0
     total_cached = 0
@@ -288,7 +287,7 @@ def main():
 
     logger.info("Done. Fetched: %d bars files | Already cached: %d | Empty/failed: %d",
                 total_fetched, total_cached, total_empty)
-    logger.info("2022 cache is ready. Run: python3 -m bot.backtest --long --start 2022-01-03 --end 2022-12-30 --risk-scale 2.0")
+    logger.info("2025-26 cache is ready. Run: python3 -m bot.backtest --long --regime --start 2025-01-02 --end 2026-05-29")
 
 
 if __name__ == "__main__":

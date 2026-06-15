@@ -169,7 +169,7 @@ def load_sp500_constituents_as_of(
     as_of : date
         Historical rebalance date.
     api_key : str, optional
-        EODHD API key. Defaults to config.EODHD_API_KEY.
+        EODHD API key. Falls back to EODHD_API_KEY environment variable.
 
     Returns
     -------
@@ -178,17 +178,13 @@ def load_sp500_constituents_as_of(
     Raises
     ------
     ValueError
-        If EODHD is not enabled or API key is missing.
+        If the API key is missing.
     RuntimeError
         If EODHD returns empty change history (likely an API key / plan issue).
     """
+    import os
     if api_key is None:
-        from config import USE_EODHD, EODHD_API_KEY
-        if not USE_EODHD:
-            raise ValueError(
-                "EODHD is not enabled. Set BOT_USE_EODHD=true and EODHD_API_KEY in your environment."
-            )
-        api_key = EODHD_API_KEY
+        api_key = os.getenv("EODHD_API_KEY", "")
     if not api_key:
         raise ValueError("EODHD_API_KEY is not set. Obtain a key at https://eodhd.com.")
 
@@ -234,13 +230,14 @@ def bulk_build_snapshots(
     -------
     dict mapping date → Path of written CSV.
     """
-    from data.universe import save_universe_snapshot
-
+    import os
     if api_key is None:
-        from config import EODHD_API_KEY
-        api_key = EODHD_API_KEY
+        api_key = os.getenv("EODHD_API_KEY", "")
     if not api_key:
         raise ValueError("EODHD_API_KEY is not set.")
+    if snapshot_dir is None:
+        snapshot_dir = Path("data/universe_snapshots")
+    snapshot_dir.mkdir(parents=True, exist_ok=True)
 
     if verbose:
         print("[eodhd] Fetching current constituents and change history...")
@@ -252,7 +249,8 @@ def bulk_build_snapshots(
     written: Dict[date, Path] = {}
     for i, d in enumerate(sorted(rebalance_dates)):
         tickers = reconstruct_constituents_as_of(d, current, changes)
-        path = save_universe_snapshot(tickers, as_of=d, snapshot_dir=snapshot_dir)
+        path = snapshot_dir / f"sp500_{d.isoformat()}.csv"
+        pd.DataFrame({"ticker": tickers}).to_csv(path, index=False)
         written[d] = path
         if verbose:
             print(f"[eodhd] {i + 1}/{len(rebalance_dates)}  {d}  →  {len(tickers)} tickers  →  {path.name}")

@@ -34,4 +34,13 @@ class DashboardState:
         # Config key-value snapshot (populated once at startup)
         self.config_snapshot: Dict[str, Any] = {}
 
+        # Short strategy state
+        self.short_enabled: bool = False
+        self.short_heat_pct: float = 0.0
+        self.short_allowed: bool = True        # SPY < 50-day MA (re-evaluated each day)
+        self.short_config_snapshot: Dict[str, Any] = {}
+
+        # Which long entry strategy is active
+        self.long_strategy_name: str = "gap_hold"
+
         self._lock = threading.RLock()

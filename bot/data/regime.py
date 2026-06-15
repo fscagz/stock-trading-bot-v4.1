@@ -37,6 +37,16 @@ def _load_spy(start: str = "2019-01-01", end: Optional[str] = None) -> pd.DataFr
     return _SPY_CACHE
 
 
+def clear_spy_cache() -> None:
+    """Drop the in-process SPY cache so the next is_uptrend() reloads fresh data.
+
+    The live runner calls this on each new trading day; without it a process that
+    runs 24/7 would keep evaluating the regime against SPY data frozen at startup.
+    """
+    global _SPY_CACHE
+    _SPY_CACHE = None
+
+
 class RegimeFilter:
     """Checks whether the broad market is in an uptrend or downtrend.
 

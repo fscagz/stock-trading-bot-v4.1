@@ -18,7 +18,7 @@ from bot.backtest.bar_fetcher import BarFetcher
 from bot.backtest.candidate_screener import CandidateScreener
 from bot.backtest.news_filter import NewsFilter
 from bot.backtest.simulator import Simulator
-from bot.config import V4Config, make_long_config
+from bot.config import V4Config, make_gap_hold_config
 from bot.data.daily_loader import get_daily
 from bot.intraday.types import TradeRecord
 
@@ -80,7 +80,7 @@ def main() -> None:
     parser.add_argument("--date", dest="target_date", help="Date YYYY-MM-DD (required with --symbol)")
     parser.add_argument("--slippage", type=float, default=0.001, help="Slippage fraction (default 0.001)")
     parser.add_argument("--long", action="store_true",
-                        help="Use make_long_config() — catalyst momentum longs (default: V4Config)")
+                        help="Use make_gap_hold_config() — catalyst momentum longs (default: V4Config)")
     parser.add_argument("--risk-scale", type=float, default=1.0,
                         help="Scale risk_per_trade and max_portfolio_heat (default 1.0)")
     parser.add_argument("--regime", action="store_true", default=False,
@@ -103,7 +103,7 @@ def main() -> None:
     if news_mode == "auto":
         news_mode = "require" if args.long else "ignore"
 
-    config = make_long_config() if args.long else V4Config()
+    config = make_gap_hold_config() if args.long else V4Config()
 
     if args.risk_scale != 1.0:
         config.risk_per_trade = round(config.risk_per_trade * args.risk_scale, 6)

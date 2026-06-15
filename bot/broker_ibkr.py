@@ -14,8 +14,10 @@ try:
 except ImportError:
     _HAVE_IBKR = False
 
-# How long to wait for snapshot tick data after reqMktData
-_SNAPSHOT_WAIT_SEC = 2
+_SNAPSHOT_WAIT_SEC = 3
+_SNAPSHOT_RETRY_WAIT_SEC = 5
+# Stay well under the typical 100-line concurrent market data limit.
+_CHUNK_SIZE = 50
 
 
 def get_movers_ibkr(host: str, port: int, client_id: int, top_n: int = 200) -> List[dict]:
@@ -53,26 +55,56 @@ def get_movers_ibkr(host: str, port: int, client_id: int, top_n: int = 200) -> L
 
         logger.debug("IBKR scanner: %d symbols returned", len(scan_data))
 
-        # Use delayed market data (type 3) — real-time requires a separate streaming
-        # subscription beyond our historical-data plan, but delayed gives us the fields
-        # we need: ticker.last (current price) and ticker.close (previous day's close).
-        ib.reqMarketDataType(3)
+        ib.reqMarketDataType(1)
 
-        # Batch-request snapshots for all symbols, then wait once
+        mkt_errors: dict[int, tuple[int, str]] = {}
+
+        def _on_error(reqId, errorCode, errorString, contract, advancedOrderRejectJson=""):
+            if reqId > 0:
+                mkt_errors[reqId] = (errorCode, errorString)
+                logger.warning(
+                    "Market data error reqId=%d code=%d: %s", reqId, errorCode, errorString
+                )
+
+        ib.errorEvent += _on_error
+
         contracts = [item.contractDetails.contract for item in scan_data]
-        tickers = [
-            ib.reqMktData(c, genericTickList="", snapshot=True, regulatorySnapshot=False)
-            for c in contracts
+        all_tickers = []
+
+        # Request in chunks to avoid exceeding concurrent market data line limits.
+        for i in range(0, len(contracts), _CHUNK_SIZE):
+            chunk = contracts[i : i + _CHUNK_SIZE]
+            chunk_tickers = [
+                ib.reqMktData(c, genericTickList="", snapshot=True, regulatorySnapshot=False)
+                for c in chunk
+            ]
+            ib.sleep(_SNAPSHOT_WAIT_SEC)
+            all_tickers.extend(chunk_tickers)
+
+        # Retry any symbols that came back NaN (slow delivery or transient line-limit hit).
+        retry_indices = [
+            i for i, t in enumerate(all_tickers)
+            if math.isnan(t.last) or math.isnan(t.close)
         ]
-        ib.sleep(_SNAPSHOT_WAIT_SEC)
+        if retry_indices:
+            logger.warning("Retrying %d symbols with missing market data", len(retry_indices))
+            retry_contracts = [contracts[i] for i in retry_indices]
+            retry_tickers = [
+                ib.reqMktData(c, genericTickList="", snapshot=True, regulatorySnapshot=False)
+                for c in retry_contracts
+            ]
+            ib.sleep(_SNAPSHOT_RETRY_WAIT_SEC)
+            for idx, rt in zip(retry_indices, retry_tickers):
+                all_tickers[idx] = rt
 
         results = []
-        for item, ticker in zip(scan_data, tickers):
+        for item, ticker in zip(scan_data, all_tickers):
             symbol = item.contractDetails.contract.symbol
             last = ticker.last
             prev_close = ticker.close
 
             if math.isnan(last) or math.isnan(prev_close) or prev_close == 0:
+                logger.warning("No market data for %s after retry — skipping", symbol)
                 continue
 
             change = last - prev_close

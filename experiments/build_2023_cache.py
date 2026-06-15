@@ -1,10 +1,10 @@
 """
-Build 2024 bar cache using Alpaca SIP feed.
+Build 2023 bar cache using Alpaca SIP feed.
 
 Steps:
-  1. Delete existing 2024 screener preload (built with yfinance/iex, unreliable).
-  2. Rebuild screener preload for 2023-11-27..2024-12-31 using SIP feed.
-  3. For each 2024 trading day, find candidates (15%+ intraday, $250k avg vol).
+  1. Delete existing 2023 screener preload (built with yfinance, unreliable).
+  2. Rebuild screener preload for 2022-11-28..2023-12-31 using SIP feed.
+  3. For each 2023 trading day, find candidates (15%+ intraday, $250k avg vol).
   4. Fetch 1-min bars from Alpaca SIP for any uncached candidate/date pair.
 """
 from __future__ import annotations
@@ -24,7 +24,7 @@ import pandas as pd
 import requests
 from dotenv import load_dotenv
 
-load_dotenv(Path(__file__).resolve().parent / ".env", override=True)
+load_dotenv(Path(__file__).resolve().parent.parent / ".env", override=True)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
@@ -38,12 +38,12 @@ _SCREENER_CACHE_DIR = Path("screener_cache")
 _BAR_CACHE_DIR = Path("backtest_results/cache")
 _BATCH_SIZE = 100
 
-START = date(2024, 1, 2)
-END = date(2024, 12, 31)
-PRELOAD_START = date(2023, 11, 27)  # 35-day buffer before 2024
-PRELOAD_END = date(2025, 1, 1)
+START = date(2023, 1, 3)
+END = date(2023, 12, 29)
+PRELOAD_START = date(2022, 11, 28)  # 35-day buffer before 2023
+PRELOAD_END = date(2023, 12, 31)
 
-# Long strategy thresholds (matches make_long_config)
+# Long strategy thresholds (matches make_gap_hold_config)
 STAGE1_MIN_PCT_CHANGE = 0.15
 STAGE1_MIN_PRICE = 2.00
 MIN_AVG_DOLLAR_VOLUME = 250_000
@@ -139,12 +139,12 @@ def fetch_daily_sip(symbols: List[str], start: str, end: str) -> Dict[str, pd.Da
 
 
 def build_screener_preload(universe: List[str]) -> Dict[str, pd.DataFrame]:
-    """Rebuild the 2022 screener preload using SIP daily bars."""
+    """Rebuild the 2023 screener preload using SIP daily bars."""
     preload_key = f"{PRELOAD_START}_{PRELOAD_END}"
     pkl_path = _SCREENER_CACHE_DIR / f"{preload_key}.pkl"
     _SCREENER_CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
-    # Always rebuild to ensure SIP data (replaces any yfinance-based PKL)
+    # Always rebuild for 2022 to ensure sip data
     if pkl_path.exists():
         logger.info("Removing existing screener preload to rebuild with SIP feed...")
         pkl_path.unlink()
@@ -248,9 +248,9 @@ def main():
     logger.info("=== Step 2: Build screener preload (SIP daily bars) ===")
     daily_cache = build_screener_preload(universe)
 
-    logger.info("=== Step 3: Identify 2024 candidates and fetch intraday bars ===")
+    logger.info("=== Step 3: Identify 2022 candidates and fetch intraday bars ===")
     days = trading_days(START, END)
-    logger.info("Processing %d trading days in 2024", len(days))
+    logger.info("Processing %d trading days in 2023", len(days))
 
     total_fetched = 0
     total_cached = 0
@@ -268,26 +268,22 @@ def main():
 
         logger.info("%s: %d candidates, %d to fetch", d, len(cands), len(missing))
 
-        def _fetch(sym: str):
-            bars = fetch_intraday_sip(sym, d)
-            return sym, bars
-
-        # Sequential to respect rate limits — Alpaca allows ~200 req/min on data API
         for sym in missing:
             bars = fetch_intraday_sip(sym, d)
             cache_path = _BAR_CACHE_DIR / f"{sym}_{d}.json"
             if bars is not None:
-                cache_path.write_text(json.dumps(bars))
                 if bars:
+                    cache_path.write_text(json.dumps(bars))
                     total_fetched += 1
                 else:
                     total_empty += 1
-                    cache_path.unlink()  # don't cache empty files
-            time.sleep(0.15)  # ~7 req/sec, well under 200/min limit
+            else:
+                total_empty += 1
+            time.sleep(0.15)  # ~7 req/sec, under 200/min limit
 
     logger.info("Done. Fetched: %d bars files | Already cached: %d | Empty/failed: %d",
                 total_fetched, total_cached, total_empty)
-    logger.info("2024 cache is ready. Run: python3 -m bot.backtest --long --regime --start 2024-01-02 --end 2024-12-31")
+    logger.info("2023 cache is ready. Run: python3 run_ma_period_test.py")
 
 
 if __name__ == "__main__":

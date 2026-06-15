@@ -4,7 +4,7 @@ V4 live runner — short and long momentum strategies with independent heat budg
 On each 1-min bar:
   1. Update ATR / VWAP indicators
   2. If position open: check stop/target/manager exits → cancel broker stop → cover/sell
-  3. If no position, window 9:45-11:30: run Stage-2 validator → enter → submit broker stop
+  3. If no position, from market open (9:30): run Stage-2 validator → enter → submit broker stop
   4. Force-close all remaining positions at 15:55 ET
 
 Threading model
@@ -26,13 +26,13 @@ after every PnL event via _sync_equity().
 
 Broker-side stops
 -----------------
-After every short_sell, a stop-buy order is submitted to Alpaca at the same
-stop price. If the process dies, Alpaca's stop covers the position automatically.
-When our code exits a position for any reason, it cancels the broker stop first.
-If the cancel fails because the stop already filled (broker covered while we were
-monitoring), the cover order is skipped — preventing a double-buy.
-When the trailing stop moves, the old broker stop is cancelled and a new one
-submitted at the updated price.
+After every entry a protective stop is submitted to Alpaca at the stop price:
+a stop-SELL for longs, a stop-BUY for shorts. If the process dies, Alpaca's stop
+closes the position automatically. When our code exits a position for any reason,
+it cancels the broker stop first. If the cancel fails because the stop already
+filled (broker closed while we were monitoring), the manual exit order is skipped
+— preventing a double order. When the trailing stop moves, the old broker stop is
+cancelled and a new one submitted at the updated price.
 
 Restart reconciliation
 ----------------------
@@ -59,7 +59,7 @@ import copy
 import bot.broker_alpaca as broker
 import bot.broker_ibkr as broker_ibkr
 from bot.backtest.news_filter import NewsFilter
-from bot.config import V4Config, make_long_config
+from bot.config import V4Config, make_gap_hold_config
 from bot.dashboard.state import DashboardState
 from bot.data.regime import RegimeFilter
 from bot.intraday.data.stream import BarStream
@@ -77,10 +77,36 @@ from bot.trade_logger import TradeLogger
 _ET = ZoneInfo("America/New_York")
 _ENTRY_START = dtime(9, 30)  # entries open from market open
 _EOD_FORCE_CLOSE = dtime(15, 55)
+_PULLBACK_LIMIT_CUTOFF = dtime(15, 45)  # don't arm new pullback limits after this time
 _WATCHLIST_REFRESH_SEC = 30
 _STATUS_LOG_SEC = 60
 _ETB_REFRESH_SEC = 1800        # refresh ETB list every 30 minutes
-_MIN_MOVER_PCT = 15.0          # matches make_long_config() stage1_min_price_change_pct (0.15 = 15%)
+
+# Hybrid entry parameters — H+ finalist configuration.
+# Tier-4 signals (confidence_multiplier ≥ 4.0) enter at market with 4×ATR target.
+# Tier 1–3 signals arm a pullback limit 2×ATR below the signal close, valid for 60 min,
+# filling with a 2.5×ATR target and the same 1.5×ATR stop.
+# On narrow days (<35 symbols active), additionally require close ≥ 10-day daily MA.
+_HYBRID_PULLBACK_ATR        = 2.0   # limit depth: N×ATR below signal close
+_HYBRID_PULLBACK_TTL_MIN    = 60    # cancel unfilled pullback limit after N minutes
+_HYBRID_PULLBACK_TARGET_ATR = 2.5   # target multiplier for pullback fills
+_HYBRID_CHASE_TIER          = 4.0   # confidence_multiplier threshold for immediate market entry
+_HYBRID_NARROW_BREADTH      = 35    # fewer active symbols than this = narrow day
+_HYBRID_MA_PERIOD           = 10    # narrow-day filter: require close ≥ N-day daily MA
+
+# Gap-and-hold entry: stock gaps ≥5% at open vs prior close, holds within 2% of the
+# day open for 15 bars, then enters at market on bar 16 (news catalyst still required).
+_GAP_HOLD_MIN_PCT    = 0.05   # minimum gap at open vs prior close
+_GAP_HOLD_BARS       = 15     # bars price must hold near the day open
+_GAP_HOLD_TOLERANCE  = 0.02   # max retracement from day open before gap is "broken"
+
+# HOD-rejection short entry: fade a parabolic after the day's high is rejected.
+# Stock must have run ≥75% from its day open; wait for 10 consecutive bars without
+# a new intraday high; stop above the day's high, target below entry.
+_SHORT_HOD_MIN_RUN_PCT = 75.0   # min gain from day open before the pattern qualifies
+_SHORT_HOD_REJ_BARS    = 10     # bars without new intraday high before entry fires
+_SHORT_HOD_STOP_MULT   = 2.0    # stop: HOD + N×ATR (above the day's peak, not entry)
+_SHORT_HOD_TARGET_MULT = 2.0    # target: entry − N×ATR
 
 logger = logging.getLogger(__name__)
 
@@ -107,6 +133,7 @@ class LiveRunner:
         risk_scale: float = 1.0,
         dash: Optional[DashboardState] = None,
         trade_log_dir: str = "logs",
+        enable_shorts: bool = False,
     ) -> None:
         if risk_scale != 1.0:
             for cfg in (short_config, long_config):
@@ -128,12 +155,14 @@ class LiveRunner:
         self._short_cfg = short_config
         self._long_cfg = long_config
         self._etb_set = etb_set
+        self._shorts_enabled = enable_shorts
         self._api_key = api_key
         self._secret_key = secret_key
 
         self._news_filter = NewsFilter(api_key, secret_key, cache_only=False)
-        self._regime_filter = RegimeFilter()
-        self._regime: dict = {"date": None, "uptrend": True}  # re-evaluated each trading day
+        self._regime_filter = RegimeFilter()                    # SPY vs 20-day MA (long gate)
+        self._short_regime_filter = RegimeFilter(ma_period=50)  # SPY vs 50-day MA (short gate)
+        self._regime: dict = {"date": None, "uptrend": True, "short_allowed": True}  # re-evaluated each trading day
         self._dash = dash
         self._trade_logger = TradeLogger(log_dir=trade_log_dir)
         self._open_records: Dict[str, TradeRecord] = {}
@@ -154,6 +183,24 @@ class LiveRunner:
         self._trading_date: Optional[date] = None   # used to detect day rollover
         self._day_highs: Dict[str, float] = {}      # running intraday high per symbol (for dist-from-high filter)
         self._subscribed_today: Set[str] = set()    # symbols added to watchlist today — never removed mid-session
+        # Hybrid entry state
+        self._armed_limits: Dict[str, dict] = {}    # sym → {order_id, limit, atr, shares, mult, armed_at}
+        self._daily_ma10: Dict[str, float] = {}     # sym → 10-day daily close MA (for narrow-day filter)
+        self._prev_bars: Dict[str, Bar] = {}        # sym → previous bar (for vol-vs-prev-bar filter)
+
+        # Gap-and-hold entry state (reset each trading day)
+        self._day_opens: Dict[str, float] = {}      # sym → first bar's open price
+        self._prev_closes: Dict[str, float] = {}    # sym → prior day's close (persists across days)
+        self._gap_tracking: Dict[str, int] = {}     # sym → bar count since gap detected
+        self._gap_confirmed: Set[str] = set()       # syms where gap held ≥ _GAP_HOLD_BARS
+
+        # HOD-rejection short entry state (reset each trading day)
+        self._short_hod: Dict[str, dict] = {}       # sym → {hod, bars_since_hod, qualified}
+
+        # News catalysts are pre-fetched in the watchlist daemon thread so the
+        # event-loop thread never blocks on an HTTP call inside _on_bar.
+        self._news_warmed: Set[str] = set()
+        self._news_warmed_date: Optional[date] = None
 
         # --- Shared (see threading model above) ---
         self._baseline_vols: Dict[str, float] = {}
@@ -190,6 +237,16 @@ class LiveRunner:
         Called on the first bar of a new session so the bot behaves correctly
         when running 24/7 without restarts.
         """
+        # Cancel any unfilled pullback limit orders that survived from yesterday
+        for sym, armed in list(self._armed_limits.items()):
+            try:
+                broker.cancel_order(armed["order_id"])
+                logger.info("Cancelled stale pullback limit for %s (order %s)", sym, armed["order_id"])
+            except Exception:
+                pass
+        self._armed_limits.clear()
+        self._short_hod.clear()
+
         # Reconcile equity with broker before resetting session_start_equity
         # so daily_pnl_pct() is accurate for the new day.
         try:
@@ -229,14 +286,16 @@ class LiveRunner:
                 **self._short_portfolio.positions,
                 **self._long_portfolio.positions,
             }
-            # Use long portfolio for heat/kill-switch (shorts are disabled)
             lp = self._long_portfolio
             self._dash.portfolio_heat_pct = lp.portfolio_heat_pct
             self._dash.kill_switch_active = lp.kill_switch_active
             self._dash.consecutive_losses = lp.consecutive_losses
             self._dash.cooldown_until = lp.cooldown_until
-            self._dash.regime_uptrend = self._regime["uptrend"]
-            self._dash.regime_date = self._regime["date"]
+            self._dash.short_heat_pct = self._short_portfolio.portfolio_heat_pct
+            reg = self._regime  # single read — daemon may swap the dict concurrently
+            self._dash.regime_uptrend = reg["uptrend"]
+            self._dash.regime_date = reg["date"]
+            self._dash.short_allowed = reg.get("short_allowed", True)
             if closed_record is not None:
                 self._dash.closed_trades.append(closed_record)
 
@@ -259,11 +318,23 @@ class LiveRunner:
     # ------------------------------------------------------------------
 
     def _submit_broker_stop(self, sym: str, position: Position) -> None:
-        """Submit a broker-side stop-buy order and store the order ID."""
+        """Submit a broker-side protective stop and store the order ID.
+
+        Longs get a stop-SELL (sells if price falls to the stop); shorts get a
+        stop-BUY (covers if price rises to the stop). Submitting the wrong side
+        leaves the position unprotected at the broker and, if triggered, would
+        *add* to the position instead of closing it.
+        """
         try:
-            order_id = broker.submit_stop_buy_order(sym, position.shares, position.stop_price)
+            if position.direction == "short":
+                order_id = broker.submit_stop_buy_order(sym, position.shares, position.stop_price)
+            else:
+                order_id = broker.submit_stop_order(sym, position.shares, position.stop_price)
             position.stop_order_id = order_id
-            logger.debug("Broker stop submitted for %s @ %.2f (order %s)", sym, position.stop_price, order_id)
+            logger.debug(
+                "Broker %s stop submitted for %s @ %.2f (order %s)",
+                position.direction, sym, position.stop_price, order_id,
+            )
         except Exception as exc:
             logger.error(
                 "Failed to submit broker stop for %s @ %.2f: %s — position unprotected at broker level",
@@ -329,11 +400,31 @@ class LiveRunner:
             self._entered_today.clear()
             self._day_highs.clear()
             self._subscribed_today.clear()
+            self._day_opens.clear()
+            self._gap_tracking.clear()
+            self._gap_confirmed.clear()
             logger.info("New trading day %s — daily state reset", today)
 
         # Track running intraday high for each symbol (for stage2_min_dist_from_day_high_pct)
         if bar.high > self._day_highs.get(sym, 0.0):
             self._day_highs[sym] = bar.high
+
+        # Gap-and-hold tracking: detect gap on first bar, count hold bars toward confirmation
+        if sym not in self._day_opens:
+            self._day_opens[sym] = bar.open
+            pc = self._prev_closes.get(sym, 0.0)
+            if pc > 0 and bar.open >= pc * (1.0 + _GAP_HOLD_MIN_PCT):
+                self._gap_tracking[sym] = 1
+        elif sym in self._gap_tracking and sym not in self._gap_confirmed:
+            day_open = self._day_opens[sym]
+            if day_open > 0 and bar.close < day_open * (1.0 - _GAP_HOLD_TOLERANCE):
+                del self._gap_tracking[sym]  # gap broken — stop counting
+            else:
+                self._gap_tracking[sym] += 1
+                if self._gap_tracking[sym] >= _GAP_HOLD_BARS:
+                    self._gap_confirmed.add(sym)
+                    logger.info("GAP-HOLD confirmed for %s (gap open=%.2f prev_close=%.2f)",
+                                sym, day_open, self._prev_closes.get(sym, 0.0))
 
         # Accumulate bar for EOD backtest cache write (market hours only)
         if dtime(9, 30) <= bar_et.time() <= dtime(16, 0):
@@ -346,12 +437,34 @@ class LiveRunner:
         atr_ind, vwap_ind = self._get_or_create_indicators(sym)
         atr_val = atr_ind.update(bar)
         vwap_val = vwap_ind.update(bar)
+        prev_bar = self._prev_bars.get(sym)   # capture BEFORE overwrite (vol-vs-prev-bar filter)
+        self._prev_bars[sym] = bar
         self._last_prices[sym] = bar.close
         if self._dash is not None:
             with self._dash._lock:
                 self._dash.last_prices[sym] = bar.close
         with self._baseline_vols_lock:
             baseline = self._baseline_vols.get(sym, 0.0)
+
+        # Update per-symbol HOD state for short entry tracking (market hours only)
+        if dtime(9, 30) <= bar_time < _EOD_FORCE_CLOSE:
+            if sym not in self._short_hod:
+                self._short_hod[sym] = {
+                    "hod": bar.high,
+                    "bars_since_hod": 0,
+                    "qualified": False,
+                }
+            else:
+                state = self._short_hod[sym]
+                if bar.high > state["hod"]:
+                    state["hod"] = bar.high
+                    state["bars_since_hod"] = 0
+                else:
+                    state["bars_since_hod"] += 1
+                if not state["qualified"]:
+                    open_ref = self._day_opens.get(sym, 0.0)
+                    if open_ref > 0 and (state["hod"] - open_ref) / open_ref * 100 >= _SHORT_HOD_MIN_RUN_PCT:
+                        state["qualified"] = True
 
         # Determine which portfolio owns this symbol (if any)
         active_portfolio = None
@@ -360,11 +473,16 @@ class LiveRunner:
         elif sym in self._long_portfolio.positions:
             active_portfolio = self._long_portfolio
 
-        # Force-close all positions at 15:55 ET
+        # Force-close all positions at 15:55 ET; also resolve any armed pullback limits.
         if bar_time >= _EOD_FORCE_CLOSE:
             if active_portfolio is not None:
                 logger.info("EOD force-close %s", sym)
                 self._execute_close(sym, bar.close, "eod_force", active_portfolio)
+            if sym in self._armed_limits:
+                # Cancels the resting order; if it already filled in a bar gap, the
+                # position is registered (and the EOD timer will then close it) rather
+                # than orphaned. bar_time >= cutoff guarantees the cancel branch.
+                self._process_armed_limit(sym, bar, bar_time)
             return
 
         # --- Exit logic for open positions ---
@@ -401,6 +519,14 @@ class LiveRunner:
         # --- Entry logic ---
         if bar_time < _ENTRY_START:
             return
+
+        # Pullback limit: confirm fill / TTL / EOD cancellation against the broker.
+        # Must run before the entered_today gate — sym is already in entered_today
+        # once a limit is armed.
+        if sym in self._armed_limits:
+            self._process_armed_limit(sym, bar, bar_time)
+            return
+
         if sym in self._entered_today:
             return
         if not (atr_val and baseline > 0):
@@ -410,60 +536,107 @@ class LiveRunner:
         triggered, ks_reason = self._long_kill_switch.check(self._long_portfolio, bar.timestamp)
         if triggered:
             logger.warning("KILL SWITCH: %s — long entries halted for session", ks_reason)
+            # Halt resting pullback orders too, or they could still fill after the halt.
+            self._cancel_all_armed_limit_orders("kill_switch")
             self._sync_dash()
             return
         if self._long_portfolio.in_cooldown(bar.timestamp):
             return
 
-        # --- Short entry (ETB-only, independent heat budget) ---
-        if sym in self._etb_set and bar.close >= self._short_cfg.stage1_min_price:
-            if baseline * 390 * bar.close >= self._short_cfg.min_avg_dollar_volume:
-                can_enter, reason = self._short_portfolio.can_enter(sector="Unknown", now=bar.timestamp)
-                if can_enter and self._short_validator.validate(bar, baseline):
-                    self._enter_short(sym, bar, atr_val, baseline)
-                    return
-                elif not can_enter:
-                    logger.debug("Short blocked for %s: %s", sym, reason)
+        # --- Gap-hold entry (long only, news catalyst required, no momentum validator) ---
+        if sym in self._gap_confirmed:
+            reg = self._regime
+            if reg["date"] == today and reg["uptrend"]:
+                if (bar.close >= self._long_cfg.stage1_min_price
+                        and baseline * 390 * bar.close >= self._long_cfg.min_avg_dollar_volume):
+                    can_enter, _ = self._long_portfolio.can_enter(sector="Unknown", now=bar.timestamp)
+                    if can_enter and self._news_filter.has_catalyst(sym, today):
+                        self._enter_gap_hold(sym, bar, atr_val, baseline)
+                        return
 
-        # --- Regime filter: check once per day, skip longs in SPY downtrend ---
-        if self._regime["date"] != today:
-            self._regime["uptrend"] = self._regime_filter.is_uptrend(today)
-            self._regime["date"] = today
-            if self._regime["uptrend"]:
-                logger.info("REGIME %s: SPY uptrend — long entries enabled", today)
-            else:
-                logger.info("REGIME %s: SPY below 20-day MA — long entries blocked", today)
-            self._sync_dash()
+        # --- Short entry (HOD-rejection, ETB-only, independent heat budget) ---
+        # Fires when a parabolic mover (≥75% from day open) forms a multi-bar top.
+        # The regime gate (SPY < 50-day MA) is checked here; no long position in same sym.
+        if (self._shorts_enabled
+                and sym in self._etb_set
+                and sym not in self._long_portfolio.positions
+                and bar.close >= self._short_cfg.stage1_min_price
+                and baseline * 390 * bar.close >= self._short_cfg.min_avg_dollar_volume):
+            reg = self._regime
+            if reg.get("short_allowed") and reg["date"] == today:
+                hod_state = self._short_hod.get(sym)
+                if (hod_state
+                        and hod_state["qualified"]
+                        and hod_state["bars_since_hod"] >= _SHORT_HOD_REJ_BARS):
+                    can_enter, reason = self._short_portfolio.can_enter(sector="Unknown", now=bar.timestamp)
+                    if can_enter:
+                        self._enter_short_hod(sym, bar, atr_val, hod_state["hod"])
+                        return
+                    else:
+                        logger.debug("Short HOD blocked for %s: %s", sym, reason)
 
         # --- Long entry (independent heat budget) ---
-        if self._regime["uptrend"] and bar.close >= self._long_cfg.stage1_min_price:
-            if baseline * 390 * bar.close >= self._long_cfg.min_avg_dollar_volume:
-                # stage2_min_dist_from_day_high_pct: entry must be ≥2% below intraday high.
-                # Avoids chasing the absolute top of a spike — same check as the backtest simulator.
-                day_high = self._day_highs.get(sym, bar.high)
-                min_dist = self._long_cfg.stage2_min_dist_from_day_high_pct
-                if min_dist > 0 and day_high > 0 and (day_high - bar.close) / day_high < min_dist:
-                    return  # too close to the day's high — skip
+        # Regime is evaluated off the event-loop thread (see _maybe_refresh_regime);
+        # here we only read the cached result. If it isn't current for today yet,
+        # skip longs rather than block the bar handler on an SPY download.
+        reg = self._regime
+        if reg["date"] != today or not reg["uptrend"]:
+            return
+        if bar.close < self._long_cfg.stage1_min_price:
+            return
+        if baseline * 390 * bar.close < self._long_cfg.min_avg_dollar_volume:
+            return
 
-                can_enter, reason = self._long_portfolio.can_enter(sector="Unknown", now=bar.timestamp)
-                if can_enter and self._long_validator.validate(bar, baseline):
-                    has_cat = self._news_filter.has_catalyst(sym, today)
-                    if not has_cat:
-                        # Tier-4 bypass: extreme confidence signal (4× mult) doesn't need
-                        # external news — the volume + ROC combination IS the catalyst.
-                        conf = self._long_validator.confidence_score(bar, baseline)
-                        if self._long_cfg.confidence_multiplier(conf) >= 4.0:
-                            logger.info("Tier-4 bypass for %s — entering without news catalyst", sym)
-                            has_cat = True
-                        else:
-                            logger.debug("No catalyst for %s — skipping entry", sym)
-                    if has_cat:
-                        self._enter_long(sym, bar, atr_val, baseline)
-                elif not can_enter:
-                    logger.debug("Long blocked for %s: %s", sym, reason)
+        # Gate order mirrors the backtest simulator: can_enter → validate() →
+        # post-validate filters (day-high distance, volume acceleration). The
+        # validator must be reached on the same bars as the backtest so its ROC
+        # history isn't computed over a different (sparser) set of bars.
+        can_enter, reason = self._long_portfolio.can_enter(sector="Unknown", now=bar.timestamp)
+        if not can_enter:
+            logger.debug("Long blocked for %s: %s", sym, reason)
+            return
+        if not self._long_validator.validate(bar, baseline):
+            return
+
+        # Post-validate filter 1: entry must be ≥ stage2_min_dist_from_day_high_pct
+        # below the intraday high (avoid chasing the absolute top of a spike).
+        day_high = self._day_highs.get(sym, bar.high)
+        min_dist = self._long_cfg.stage2_min_dist_from_day_high_pct
+        if min_dist > 0 and day_high > 0 and (day_high - bar.close) / day_high < min_dist:
+            return
+
+        # Post-validate filter 2: entry bar volume must be ≥ stage2_min_vol_vs_prev_bar
+        # of the previous bar's volume (skip entries after the volume spike has peaked).
+        vol_accel = getattr(self._long_cfg, "stage2_min_vol_vs_prev_bar", 0.0)
+        if vol_accel > 0 and prev_bar is not None and prev_bar.volume > 0:
+            if bar.volume < prev_bar.volume * vol_accel:
+                return
+
+        conf = self._long_validator.confidence_score(bar, baseline)
+        mult = self._long_cfg.confidence_multiplier(conf)
+
+        has_cat = self._news_filter.has_catalyst(sym, today)
+        if not has_cat:
+            # Tier-4 bypass: extreme confidence signal doesn't need external news.
+            if mult >= _HYBRID_CHASE_TIER:
+                logger.info("Tier-4 bypass for %s — entering without news catalyst", sym)
+                has_cat = True
+            else:
+                logger.debug("No catalyst for %s — skipping entry", sym)
+                return
+
+        if mult >= _HYBRID_CHASE_TIER:
+            # Tier-4: market entry with 4×ATR target (high confidence → no waiting)
+            self._enter_long(sym, bar, atr_val, baseline)
+        elif bar_time < _PULLBACK_LIMIT_CUTOFF:
+            # Tier 1–3: arm a 2×ATR pullback limit (expires in 60 min or at 15:45)
+            self._arm_pullback_limit(sym, bar, atr_val, mult)
 
     def _enter_short(self, sym: str, bar: Bar, atr_val: float, baseline: float) -> None:
         size = compute_position_size(self._equity, atr_val, bar.close, self._short_cfg)
+        # Whole shares only: the broker stop order truncates to int, so a fractional
+        # position would be partly unprotected.
+        size.shares = int(size.shares)
         if size.shares <= 0:
             return
         self._entered_today.add(sym)
@@ -518,9 +691,87 @@ class LiveRunner:
         )
         self._sync_dash()
 
+    def _enter_short_hod(self, sym: str, bar: Bar, atr_val: float, hod_price: float) -> None:
+        """Short a parabolic reversal: stop above the day's high, target below entry.
+
+        Unlike the momentum short (stop above entry), the stop here is anchored to the
+        actual day high so a final squeeze above the entry doesn't immediately stop us out.
+        """
+        fill_est = bar.close
+        stop_price = round(hod_price + _SHORT_HOD_STOP_MULT * atr_val, 2)
+        target_price = round(fill_est - _SHORT_HOD_TARGET_MULT * atr_val, 2)
+        if target_price <= 0 or stop_price <= fill_est:
+            return
+        stop_dist = stop_price - fill_est
+        if stop_dist <= 0:
+            return
+        cfg = self._short_cfg
+        shares = int(min(
+            (self._equity * cfg.risk_per_trade) / stop_dist,
+            (self._equity * cfg.max_position_pct) / fill_est,
+        ))
+        if shares <= 0:
+            return
+
+        self._entered_today.add(sym)
+        position = Position(
+            ticker=sym, direction="short", shares=shares,
+            entry_price=fill_est, stop_price=stop_price, target_price=target_price,
+            entry_time=bar.timestamp, atr_at_entry=atr_val,
+            signals=["hod_rejection"], sector="Unknown",
+            highest_close=fill_est, entry_bar_volume=bar.volume,
+        )
+        self._short_portfolio.add_position(position)
+        with self._open_syms_lock:
+            self._open_syms.add(sym)
+        try:
+            order_id = broker.short_sell(sym, shares)
+        except Exception as exc:
+            self._short_portfolio.remove_position(sym)
+            self._entered_today.discard(sym)
+            with self._open_syms_lock:
+                self._open_syms.discard(sym)
+            logger.error("Short HOD sell failed for %s: %s", sym, exc)
+            return
+
+        actual_fill = broker.get_fill_price(order_id)
+        if actual_fill is not None and actual_fill != fill_est:
+            logger.info(
+                "Short HOD fill for %s: est=%.2f actual=%.2f (slippage %.3f%%)",
+                sym, fill_est, actual_fill,
+                abs(actual_fill - fill_est) / fill_est * 100,
+            )
+            fill_est = actual_fill
+            position.entry_price = actual_fill
+            position.stop_price = round(hod_price + _SHORT_HOD_STOP_MULT * atr_val, 2)
+            position.target_price = round(actual_fill - _SHORT_HOD_TARGET_MULT * atr_val, 2)
+            position.highest_close = actual_fill
+
+        logger.info(
+            "SHORT-HOD %s x%d @ %.2f  hod=%.2f  stop=%.2f  target=%.2f  "
+            "short_heat=%.1f%%  order=%s",
+            sym, shares, fill_est, hod_price,
+            position.stop_price, position.target_price,
+            self._short_portfolio.portfolio_heat_pct * 100, order_id,
+        )
+        self._submit_broker_stop(sym, position)
+        self._state.save_position(position)
+        self._open_records[sym] = TradeRecord(
+            ticker=sym, direction="short", entry_time=bar.timestamp,
+            entry_price=fill_est, shares=shares,
+            stop_price=position.stop_price, target_price=position.target_price,
+            signals=["hod_rejection"], sector="Unknown", regime="",
+            portfolio_heat_at_entry=self._short_portfolio.portfolio_heat_pct,
+            expected_slippage_pct=0.0,
+        )
+        self._sync_dash()
+
     def _enter_long(self, sym: str, bar: Bar, atr_val: float, baseline: float) -> None:
         cfg = self._long_cfg
         size = compute_position_size(self._equity, atr_val, bar.close, cfg)
+        # Whole shares only: the broker stop order truncates to int, so a fractional
+        # position would be partly unprotected.
+        size.shares = int(size.shares)
         if size.shares <= 0:
             return
         # Confidence tiers: scale shares up, capped at max_position_pct (matches simulator).
@@ -583,7 +834,218 @@ class LiveRunner:
         )
         self._sync_dash()
 
+    def _enter_gap_hold(self, sym: str, bar: Bar, atr_val: float, baseline: float) -> None:
+        cfg = self._long_cfg
+        size = compute_position_size(self._equity, atr_val, bar.close, cfg)
+        size.shares = int(size.shares)
+        if size.shares <= 0:
+            return
+        self._entered_today.add(sym)
+        fill_est = bar.close
+        stop_price = size.long_stop(fill_est)
+        target_price = size.long_target(fill_est)
+        position = Position(
+            ticker=sym, direction="long", shares=size.shares,
+            entry_price=fill_est, stop_price=stop_price, target_price=target_price,
+            entry_time=bar.timestamp, atr_at_entry=atr_val,
+            signals=["gap_hold"], sector="Unknown",
+            highest_close=fill_est, entry_bar_volume=bar.volume,
+        )
+        self._long_portfolio.add_position(position)
+        with self._open_syms_lock:
+            self._open_syms.add(sym)
+        try:
+            order_id = broker.buy(sym, size.shares)
+        except Exception as exc:
+            self._long_portfolio.remove_position(sym)
+            self._entered_today.discard(sym)
+            with self._open_syms_lock:
+                self._open_syms.discard(sym)
+            logger.error("Gap-hold buy failed for %s: %s", sym, exc)
+            return
+        actual_fill = broker.get_fill_price(order_id)
+        if actual_fill is not None and actual_fill != fill_est:
+            logger.info(
+                "Gap-hold fill for %s: est=%.2f actual=%.2f (slippage %.3f%%)",
+                sym, fill_est, actual_fill,
+                abs(actual_fill - fill_est) / fill_est * 100,
+            )
+            fill_est = actual_fill
+            position.entry_price = actual_fill
+            position.stop_price = size.long_stop(actual_fill)
+            position.target_price = size.long_target(actual_fill)
+            position.highest_close = actual_fill
+        logger.info(
+            "GAP-HOLD %s x%d @ %.2f stop=%.2f target=%.2f long_heat=%.1f%% order=%s",
+            sym, size.shares, fill_est, position.stop_price, position.target_price,
+            self._long_portfolio.portfolio_heat_pct * 100, order_id,
+        )
+        self._submit_broker_stop(sym, position)
+        self._state.save_position(position)
+        self._open_records[sym] = TradeRecord(
+            ticker=sym, direction="long", entry_time=bar.timestamp,
+            entry_price=fill_est, shares=size.shares,
+            stop_price=position.stop_price, target_price=position.target_price,
+            signals=["gap_hold"], sector="Unknown", regime="",
+            portfolio_heat_at_entry=self._long_portfolio.portfolio_heat_pct,
+            expected_slippage_pct=0.0,
+        )
+        self._sync_dash()
+
+    def _arm_pullback_limit(self, sym: str, bar: Bar, atr_val: float, mult: float) -> None:
+        """Submit a pullback limit buy order for a tier 1–3 signal and track it.
+
+        The limit is placed _HYBRID_PULLBACK_ATR × ATR below the signal close.
+        If unfilled after _HYBRID_PULLBACK_TTL_MIN minutes, it is cancelled.
+        On fill, _open_pullback_position() creates the position with a 2.5×ATR target.
+        """
+        cfg = self._long_cfg
+        limit_price = round(bar.close - _HYBRID_PULLBACK_ATR * atr_val, 2)
+        if limit_price <= 0:
+            return
+
+        size = compute_position_size(self._equity, atr_val, limit_price, cfg)
+        if mult > 1.0:
+            max_shares = int(self._equity * cfg.max_position_pct / limit_price)
+            size.shares = min(int(size.shares * mult), max(0, max_shares))
+        if size.shares <= 0:
+            return
+
+        self._entered_today.add(sym)
+        try:
+            order_id = broker.submit_limit_order(sym, int(size.shares), "buy", limit_price)
+        except Exception as exc:
+            logger.error("Pullback limit order failed for %s: %s", sym, exc)
+            self._entered_today.discard(sym)
+            return
+
+        self._armed_limits[sym] = {
+            "order_id": order_id,
+            "limit": limit_price,
+            "atr": atr_val,
+            "shares": int(size.shares),
+            "mult": mult,
+            "armed_at": bar.timestamp,
+        }
+        logger.info(
+            "PULLBACK ARMED %s x%d limit=%.2f (%.1f×ATR below %.2f) ttl=%dmin order=%s",
+            sym, int(size.shares), limit_price, _HYBRID_PULLBACK_ATR,
+            bar.close, _HYBRID_PULLBACK_TTL_MIN, order_id,
+        )
+
+    def _open_pullback_position(self, sym: str, bar: Bar, armed: dict, fill_price: float, shares: int) -> None:
+        """Register a position after a pullback limit order fills.
+
+        `shares` is the broker-confirmed filled quantity (which may be less than
+        the armed quantity for a partial fill), not the originally-armed size.
+        """
+        if shares <= 0:
+            return
+        cfg = self._long_cfg
+        atr_val = armed["atr"]
+
+        size = compute_position_size(self._equity, atr_val, fill_price, cfg)
+        stop_price = size.long_stop(fill_price)
+        target_price = round(fill_price + _HYBRID_PULLBACK_TARGET_ATR * atr_val, 2)
+
+        position = Position(
+            ticker=sym, direction="long", shares=shares,
+            entry_price=fill_price, stop_price=stop_price, target_price=target_price,
+            entry_time=bar.timestamp, atr_at_entry=atr_val,
+            signals=["momentum_pullback"], sector="Unknown",
+            highest_close=fill_price, entry_bar_volume=bar.volume,
+        )
+        self._long_portfolio.add_position(position)
+        with self._open_syms_lock:
+            self._open_syms.add(sym)
+
+        self._submit_broker_stop(sym, position)
+        self._state.save_position(position)
+        self._open_records[sym] = TradeRecord(
+            ticker=sym, direction="long", entry_time=bar.timestamp,
+            entry_price=fill_price, shares=shares,
+            stop_price=stop_price, target_price=target_price,
+            signals=["momentum_pullback"], sector="Unknown", regime="",
+            portfolio_heat_at_entry=self._long_portfolio.portfolio_heat_pct,
+            expected_slippage_pct=0.0,
+        )
+        logger.info(
+            "PULLBACK FILL %s x%d @ %.2f stop=%.2f target=%.2f (%.1f×ATR) heat=%.1f%%",
+            sym, shares, fill_price, stop_price, target_price,
+            _HYBRID_PULLBACK_TARGET_ATR, self._long_portfolio.portfolio_heat_pct * 100,
+        )
+        self._sync_dash()
+
+    def _process_armed_limit(self, sym: str, bar: Bar, bar_time: dtime) -> None:
+        """Resolve a resting pullback limit order against the broker's order state.
+
+        Fills are confirmed via the order's status/filled_qty rather than inferred
+        from bar prices — a bar touching the limit doesn't guarantee a fill, and an
+        order can fill between bars. This prevents both phantom positions (registering
+        a fill that didn't happen) and orphaned positions (a real fill we never track).
+        """
+        armed = self._armed_limits[sym]
+        try:
+            status, filled_qty, avg_price = broker.get_order_status(armed["order_id"])
+        except Exception as exc:
+            logger.warning(
+                "Could not query pullback order %s for %s: %s — will retry next bar",
+                armed["order_id"], sym, exc,
+            )
+            return
+
+        # Fully filled → register the position with the actual fill price/qty.
+        if "filled" in status and "partially" not in status:
+            del self._armed_limits[sym]
+            fill_price = avg_price if avg_price is not None else armed["limit"]
+            self._open_pullback_position(sym, bar, armed, fill_price, filled_qty or armed["shares"])
+            return
+
+        # Otherwise decide whether to cancel: kill switch, TTL, or EOD cutoff.
+        elapsed_min = (bar.timestamp - armed["armed_at"]).total_seconds() / 60
+        ks_active = self._long_portfolio.kill_switch_active
+        if not (ks_active or bar_time >= _PULLBACK_LIMIT_CUTOFF or elapsed_min >= _HYBRID_PULLBACK_TTL_MIN):
+            return  # still working and within its window — leave it resting
+
+        try:
+            broker.cancel_order(armed["order_id"])
+        except Exception as exc:
+            logger.debug("Pullback limit cancel %s: %s", sym, exc)
+        # Re-query after cancel: a fill may have raced the cancel. Never orphan real shares.
+        try:
+            _, filled_qty, avg_price = broker.get_order_status(armed["order_id"])
+        except Exception:
+            filled_qty, avg_price = 0, None
+        del self._armed_limits[sym]
+        if filled_qty > 0:
+            fill_price = avg_price if avg_price is not None else armed["limit"]
+            logger.info("Pullback %s had %d filled shares at cancel — registering position", sym, filled_qty)
+            self._open_pullback_position(sym, bar, armed, fill_price, filled_qty)
+        else:
+            why = "kill_switch" if ks_active else ("eod_cutoff" if bar_time >= _PULLBACK_LIMIT_CUTOFF else "ttl")
+            logger.info("Pullback limit cancelled unfilled for %s (%s)", sym, why)
+
+    def _cancel_all_armed_limit_orders(self, reason: str) -> None:
+        """Best-effort cancel of every resting pullback order (e.g. on kill switch).
+
+        Entries are left in _armed_limits so the next bar's _process_armed_limit
+        reconciles any race-fill before dropping them.
+        """
+        for sym, armed in list(self._armed_limits.items()):
+            try:
+                broker.cancel_order(armed["order_id"])
+                logger.info("Cancelled resting pullback order for %s (%s)", sym, reason)
+            except Exception:
+                pass
+
     def _execute_close(self, sym: str, fill_price: float, reason: str, portfolio: PortfolioState) -> None:
+        """Close a position and account for it using the ACTUAL broker fill price.
+
+        `fill_price` is the theoretical exit (stop/target/last price); the real
+        fill is fetched from the exit order (or the broker stop, if it fired) and
+        used for PnL, the trade record, and slippage tracking. Equity is synced
+        only after the close is confirmed, so a failed exit leaves it untouched.
+        """
         with self._close_lock:
             position = portfolio.remove_position(sym)
         if not position:
@@ -592,57 +1054,84 @@ class LiveRunner:
             self._open_syms.discard(sym)
 
         is_short = position.direction == "short"
-        if is_short:
-            pnl = round((position.entry_price - fill_price) * position.shares, 2)
-        else:
-            pnl = round((fill_price - position.entry_price) * position.shares, 2)
-        self._sync_equity(self._equity + pnl)
 
         # Cancel broker stop before covering.
-        # Returns False if Alpaca already filled the stop (broker covered/sold for us).
+        # Returns False if the broker already filled the stop (covered/sold for us).
         need_to_cover = self._cancel_broker_stop(sym, position)
 
-        closed_record: Optional[TradeRecord] = None
+        actual_fill = fill_price  # fallback if the broker doesn't report a fill price
         if need_to_cover:
             try:
                 order_id = broker.buy_to_cover(sym, position.shares) if is_short else broker.sell(sym, position.shares)
-                self._state.remove_position(sym)
-                action = "COVER" if is_short else "SELL"
-                logger.info(
-                    "%s %s x%d @ ~%.2f pnl=%.2f reason=%s equity=%.2f order=%s",
-                    action, sym, position.shares, fill_price, pnl, reason,
-                    self._equity, order_id,
-                )
             except Exception as exc:
-                # Restore position — neither the exit nor the stop order worked
+                # Restore position — neither the exit nor the stop order worked.
+                # No equity change has been applied yet, so nothing to undo.
                 portfolio.add_position(position)
-                self._sync_equity(self._equity - pnl)
                 with self._open_syms_lock:
                     self._open_syms.add(sym)
                 logger.error("Exit order failed for %s: %s — position restored", sym, exc)
                 return
+            got = broker.get_fill_price(order_id)
+            if got is not None:
+                actual_fill = got
+            self._state.remove_position(sym)
+            action = "COVER" if is_short else "SELL"
+            logger.info(
+                "%s %s x%d @ %.2f (theo %.2f) reason=%s order=%s",
+                action, sym, position.shares, actual_fill, fill_price, reason, order_id,
+            )
         else:
+            # Broker stop already filled — use its actual fill price if available.
+            if position.stop_order_id:
+                got = broker.get_fill_price(position.stop_order_id, max_wait_sec=0.5)
+                if got is not None:
+                    actual_fill = got
             self._state.remove_position(sym)
             action = "COVERED" if is_short else "SOLD"
             logger.info(
-                "%s by broker stop %s x%d pnl≈%.2f reason=%s equity≈%.2f",
-                action, sym, position.shares, pnl, reason, self._equity,
+                "%s by broker stop %s x%d @ %.2f reason=%s",
+                action, sym, position.shares, actual_fill, reason,
             )
 
-        # Update consecutive loss counter on the relevant portfolio
-        if pnl < 0:
-            portfolio.consecutive_losses += 1
-        else:
-            portfolio.consecutive_losses = 0
+        # Accounting under _close_lock so the equity/slippage/record updates are
+        # atomic across the event-loop thread and the EOD-timer thread (both call
+        # _execute_close). Broker I/O above is intentionally outside the lock.
+        closed_record: Optional[TradeRecord] = None
+        with self._close_lock:
+            # PnL from the actual fill price.
+            if is_short:
+                pnl = round((position.entry_price - actual_fill) * position.shares, 2)
+            else:
+                pnl = round((actual_fill - position.entry_price) * position.shares, 2)
+            self._sync_equity(self._equity + pnl)
 
-        record = self._open_records.pop(sym, None)
-        if record is not None:
-            record.exit_time = datetime.now(_ET)
-            record.exit_price = fill_price
-            record.pnl = pnl
-            record.exit_reason = reason
-            self._trade_logger.log(record)
-            closed_record = record
+            # Slippage tracking — feeds the slippage kill switch (actual / expected ratio).
+            cfg = portfolio.config
+            portfolio.session_slippage_expected += (
+                position.entry_price * getattr(cfg, "expected_exit_slippage_pct", 0.0) * position.shares
+            )
+            portfolio.session_slippage_actual += abs(actual_fill - fill_price) * position.shares
+
+            # Update consecutive loss counter on the relevant portfolio.
+            if pnl < 0:
+                portfolio.consecutive_losses += 1
+            else:
+                portfolio.consecutive_losses = 0
+
+            logger.info(
+                "CLOSED %s pnl=%.2f reason=%s equity=%.2f", sym, pnl, reason, self._equity,
+            )
+
+            record = self._open_records.pop(sym, None)
+            if record is not None:
+                record.exit_time = datetime.now(_ET)
+                record.exit_price = actual_fill
+                record.pnl = pnl
+                record.exit_reason = reason
+                if position.entry_price > 0:
+                    record.actual_slippage_pct = (actual_fill - fill_price) / position.entry_price
+                self._trade_logger.log(record)
+                closed_record = record
         self._sync_dash(closed_record=closed_record)
 
     # ------------------------------------------------------------------
@@ -744,28 +1233,98 @@ class LiveRunner:
     def _build_watchlist_from_movers(self, movers: List[dict]) -> Set[str]:
         # Use the lower of the two price floors so both strategies see relevant symbols
         min_price = min(self._short_cfg.stage1_min_price, self._long_cfg.stage1_min_price)
+        # Derive the mover threshold from config (long strategy is the active one) so it
+        # can't drift away from stage1_min_price_change_pct.
+        min_change_pct = self._long_cfg.stage1_min_price_change_pct * 100
         watchlist: Set[str] = set()
         for m in movers:
             sym = m.get("symbol", "")
             pct = m.get("percent_change", 0.0)
             price = m.get("price", 0.0)
-            if pct < _MIN_MOVER_PCT:
+            if pct < min_change_pct:
                 continue
             if price < min_price:
                 continue
             watchlist.add(sym)
         return watchlist
 
+    def _maybe_refresh_regime(self, today: date) -> None:
+        """Evaluate the SPY regime for `today` if not already current. Off the bar thread.
+
+        Runs in the watchlist daemon (and once at startup) so the event-loop thread
+        never blocks on the SPY download inside _on_bar. Clears the in-process SPY
+        cache on a day change so a 24/7 process re-reads fresh data each day.
+        The result dict is swapped in atomically; _on_bar only reads it.
+        """
+        if self._regime["date"] == today:
+            return
+        from bot.data import regime as _regime_mod
+        _regime_mod.clear_spy_cache()
+        uptrend = self._regime_filter.is_uptrend(today)
+        short_allowed = not self._short_regime_filter.is_uptrend(today)  # True = SPY below MA50
+        self._regime = {"date": today, "uptrend": uptrend, "short_allowed": short_allowed}
+        if uptrend:
+            logger.info("REGIME %s: SPY uptrend — long entries enabled", today)
+        else:
+            logger.info(
+                "REGIME %s: SPY below %d-day MA — long entries blocked",
+                today, self._regime_filter._ma_period,
+            )
+        if short_allowed:
+            logger.info("REGIME %s: SPY below %d-day MA — short HOD entries enabled", today,
+                        self._short_regime_filter._ma_period)
+        else:
+            logger.info("REGIME %s: SPY above %d-day MA — short HOD entries blocked",
+                        today, self._short_regime_filter._ma_period)
+        # Update only the regime fields here (not full _sync_dash): this runs on the
+        # daemon thread, and rebuilding the positions snapshot would iterate the
+        # portfolio dicts concurrently with the event-loop thread mutating them.
+        if self._dash is not None:
+            with self._dash._lock:
+                self._dash.regime_uptrend = uptrend
+                self._dash.regime_date = today
+                self._dash.short_allowed = short_allowed
+
+    def _warm_news_cache(self, symbols: Set[str], today: date) -> None:
+        """Pre-fetch catalyst news for watchlist symbols so _on_bar reads from cache.
+
+        Runs in the watchlist daemon. has_catalyst() memoizes per (symbol, date), so
+        each symbol is fetched at most once per day; on a date change the warmed set
+        is reset so the new day's catalysts are fetched.
+        """
+        if self._news_warmed_date != today:
+            self._news_warmed = set()
+            self._news_warmed_date = today
+        for sym in symbols:
+            if sym in self._news_warmed:
+                continue
+            try:
+                self._news_filter.has_catalyst(sym, today)  # populates the in-memory + disk cache
+            except Exception as exc:
+                logger.debug("News pre-warm failed for %s: %s", sym, exc)
+            self._news_warmed.add(sym)
+
     def _refresh_watchlist_loop(self) -> None:
-        """Periodically fetch movers and queue sub/unsub requests. Daemon thread."""
+        """Periodically fetch movers and queue sub/unsub requests. Daemon thread.
+
+        Also refreshes the SPY regime and pre-warms catalyst news here so the
+        event-loop thread (_on_bar) never blocks on those network calls.
+        """
         while not self._stop_event.is_set():
             self._stop_event.wait(timeout=_WATCHLIST_REFRESH_SEC)
             if self._stop_event.is_set():
                 break
+
+            # Keep the regime current (handles day rollover for a 24/7 process).
+            try:
+                self._maybe_refresh_regime(datetime.now(_ET).date())
+            except Exception as exc:
+                logger.warning("Regime refresh failed: %s", exc)
+
             try:
                 movers = broker_ibkr.get_movers(
                     self._ibkr_host, self._ibkr_port,
-                    self._ibkr_scanner_client_id, top_n=200,
+                    self._ibkr_scanner_client_id, top_n=50,
                 )
             except Exception as exc:
                 logger.warning("Watchlist refresh failed: %s", exc)
@@ -803,6 +1362,11 @@ class LiveRunner:
                     len(to_add), len(to_remove), len(self._current_watchlist),
                     len(self._subscribed_today),
                 )
+
+            # Pre-warm catalyst news for the current watchlist (one fetch per symbol
+            # per day) so _on_bar's has_catalyst() check hits cache, never the network.
+            if self._current_watchlist:
+                self._warm_news_cache(self._current_watchlist, datetime.now(_ET).date())
 
     # ------------------------------------------------------------------
     # Status log — daemon thread
@@ -856,7 +1420,9 @@ class LiveRunner:
             logger.warning("Baseline volume fetch failed for %d symbols: %s", len(symbols), exc)
             return
 
-        updates: Dict[str, float] = {}
+        vol_updates: Dict[str, float] = {}
+        ma10_updates: Dict[str, float] = {}
+        prev_close_updates: Dict[str, float] = {}
         for sym in symbols:
             try:
                 df = raw if len(symbols) == 1 else (
@@ -865,13 +1431,27 @@ class LiveRunner:
                 if df.empty:
                     continue
                 avg_vol = float(df["Volume"].tail(20).mean())
-                updates[sym] = avg_vol / 390
+                vol_updates[sym] = avg_vol / 390
+                close_col = "Adj Close" if "Adj Close" in df.columns else "Close"
+                closes = df[close_col].dropna()
+                # 10-day close MA for the narrow-day filter
+                ma10 = float(closes.tail(_HYBRID_MA_PERIOD).mean())
+                if ma10 > 0:
+                    ma10_updates[sym] = ma10
+                # Most recent past close for gap-hold gap detection
+                if not closes.empty:
+                    pc = float(closes.iloc[-1])
+                    if pc > 0:
+                        prev_close_updates[sym] = pc
             except Exception:
                 pass
-        if updates:
+        if vol_updates:
             with self._baseline_vols_lock:
-                self._baseline_vols.update(updates)
-        logger.info("Baseline volumes loaded for %d/%d symbols", len(updates), len(symbols))
+                self._baseline_vols.update(vol_updates)
+                self._daily_ma10.update(ma10_updates)
+        if prev_close_updates:
+            self._prev_closes.update(prev_close_updates)
+        logger.info("Baseline volumes loaded for %d/%d symbols", len(vol_updates), len(symbols))
 
     def load_baseline_volumes(self, symbols: List[str]) -> None:
         logger.info("Fetching baseline volumes for %d initial symbols...", len(symbols))
@@ -880,23 +1460,28 @@ class LiveRunner:
     def _flush_bar_cache(self) -> None:
         """Write accumulated IBKR bars to the backtest cache directory.
 
-        Skips symbols whose file already exists (Alpaca historical data takes
-        precedence for past dates; this only fills in today's bars going forward).
+        Each file is dated from the bars' own timestamps, not date.today(): the
+        day-rollover flush writes the *previous* day's bars, so today() would
+        mislabel them. Skips symbols whose file already exists (Alpaca historical
+        data takes precedence for past dates).
         """
-        today = date.today()
         written = skipped = 0
         for sym, bars in self._live_bar_cache.items():
             if not bars:
                 continue
-            cache_path = self._bar_cache_dir / f"{sym}_{today}.json"
+            try:
+                bar_date = datetime.fromisoformat(bars[0]["t"]).astimezone(_ET).date()
+            except Exception:
+                bar_date = self._trading_date or date.today()
+            cache_path = self._bar_cache_dir / f"{sym}_{bar_date}.json"
             if cache_path.exists():
                 skipped += 1
                 continue
             cache_path.write_text(json.dumps(bars))
             written += 1
         logger.info(
-            "IBKR bar cache flushed: %d files written, %d skipped (already cached) for %s",
-            written, skipped, today,
+            "IBKR bar cache flushed: %d files written, %d skipped (already cached)",
+            written, skipped,
         )
         self._live_bar_cache.clear()
 
@@ -945,12 +1530,12 @@ class LiveRunner:
             self._submit_eod_close_orders()
 
     def _submit_eod_close_orders(self) -> None:
-        """Submit market close orders for all open positions. Called from EOD timer thread.
+        """Force-close all open positions at market. Called from the EOD timer thread.
 
-        Uses _close_lock to atomically claim each position before submitting the
-        broker order, preventing a double-close race with _on_bar/_execute_close
-        (which runs on the asyncio event loop thread for halted stocks that resume
-        near 15:55 with a late bar).
+        Routes through _execute_close so these closes get the same accounting as any
+        other exit — PnL, equity sync, trade-log record, slippage, dashboard update.
+        _execute_close claims each position under _close_lock, so this can't double-
+        close against a late bar event on the event-loop thread.
         """
         short_syms = list(self._short_portfolio.positions.keys())
         long_syms = list(self._long_portfolio.positions.keys())
@@ -961,43 +1546,17 @@ class LiveRunner:
             len(short_syms), len(long_syms),
         )
         for sym in short_syms:
-            with self._close_lock:
-                pos = self._short_portfolio.positions.get(sym)
-                if pos is None:
-                    continue
-                self._short_portfolio.remove_position(sym)
-            try:
-                if pos.stop_order_id:
-                    try:
-                        broker.cancel_order(pos.stop_order_id)
-                    except Exception:
-                        pass
-                broker.buy_to_cover(sym, pos.shares)
-                with self._open_syms_lock:
-                    self._open_syms.discard(sym)
-                self._state.remove_position(sym)
-                logger.info("EOD timer: COVERED short %s x%d", sym, pos.shares)
-            except Exception as exc:
-                logger.error("EOD timer: failed to cover %s: %s — check account manually", sym, exc)
+            pos = self._short_portfolio.positions.get(sym)
+            if pos is None:
+                continue
+            price = self._last_prices.get(sym, pos.entry_price)
+            self._execute_close(sym, price, "eod_force", self._short_portfolio)
         for sym in long_syms:
-            with self._close_lock:
-                pos = self._long_portfolio.positions.get(sym)
-                if pos is None:
-                    continue
-                self._long_portfolio.remove_position(sym)
-            try:
-                if pos.stop_order_id:
-                    try:
-                        broker.cancel_order(pos.stop_order_id)
-                    except Exception:
-                        pass
-                broker.sell(sym, pos.shares)
-                with self._open_syms_lock:
-                    self._open_syms.discard(sym)
-                self._state.remove_position(sym)
-                logger.info("EOD timer: SOLD long %s x%d", sym, pos.shares)
-            except Exception as exc:
-                logger.error("EOD timer: failed to sell %s: %s — check account manually", sym, exc)
+            pos = self._long_portfolio.positions.get(sym)
+            if pos is None:
+                continue
+            price = self._last_prices.get(sym, pos.entry_price)
+            self._execute_close(sym, price, "eod_force", self._long_portfolio)
 
     # ------------------------------------------------------------------
     # Main entry point
@@ -1017,7 +1576,7 @@ class LiveRunner:
         try:
             movers = broker_ibkr.get_movers(
                 self._ibkr_host, self._ibkr_port,
-                self._ibkr_scanner_client_id, top_n=200,
+                self._ibkr_scanner_client_id, top_n=50,
             )
             initial_watchlist = self._build_watchlist_from_movers(movers)
             logger.info("Movers endpoint: %d qualifying symbols", len(initial_watchlist))
@@ -1040,6 +1599,16 @@ class LiveRunner:
             len(all_initial), len(reconciled_syms), len(initial_watchlist),
         )
 
+        # Evaluate the regime up front so the first bars see a current value rather
+        # than blocking the event-loop thread on the SPY download (also keeps the
+        # daemon from racing the open). Pre-warm catalysts for the initial watchlist.
+        try:
+            self._maybe_refresh_regime(datetime.now(_ET).date())
+        except Exception as exc:
+            logger.warning("Initial regime evaluation failed: %s — longs gated until refreshed", exc)
+        if initial_watchlist:
+            self._warm_news_cache(initial_watchlist, datetime.now(_ET).date())
+
         self._stream = BarStream(self._ibkr_host, self._ibkr_port, self._ibkr_client_id, list(all_initial))
         self._stream.set_handler(self._on_bar)
 
@@ -1048,12 +1617,17 @@ class LiveRunner:
             self._sync_dash()
             start_server(self._dash)
 
-        for name, target in [
+        daemons = [
             ("watchlist-refresh", self._refresh_watchlist_loop),
             ("status-log", self._status_log_loop),
-            ("etb-refresh", self._etb_refresh_loop),
             ("eod-timer", self._eod_timer_loop),
-        ]:
+        ]
+        # Only refresh the ETB (shortable) list when shorts are actually enabled —
+        # otherwise it would silently repopulate the intentionally-empty ETB set and
+        # bring the short strategy back to life mid-session.
+        if self._shorts_enabled:
+            daemons.append(("etb-refresh", self._etb_refresh_loop))
+        for name, target in daemons:
             threading.Thread(target=target, daemon=True, name=name).start()
 
         try:

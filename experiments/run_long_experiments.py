@@ -9,10 +9,12 @@ import logging
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, timedelta
 from pathlib import Path
+import sys
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from typing import List, Dict, Tuple
 
 from dotenv import load_dotenv
-load_dotenv(Path(__file__).resolve().parent / ".env", override=True)
+load_dotenv(Path(__file__).resolve().parent.parent / ".env", override=True)
 
 import bot.broker_alpaca as broker
 from bot.backtest.backtest_metrics import compute_metrics
@@ -20,7 +22,7 @@ from bot.backtest.bar_fetcher import BarFetcher
 from bot.backtest.candidate_screener import CandidateScreener
 from bot.backtest.news_filter import NewsFilter
 from bot.backtest.simulator import Simulator
-from bot.config import make_long_config
+from bot.config import make_gap_hold_config
 from bot.intraday.types import TradeRecord
 
 logging.basicConfig(level=logging.WARNING)
@@ -46,7 +48,7 @@ def trading_days(start: date, end: date) -> List[date]:
 
 
 def make_config(dist_pct: float):
-    cfg = make_long_config()
+    cfg = make_gap_hold_config()
     cfg.stage2_min_dist_from_day_high_pct = dist_pct
     cfg.risk_per_trade = round(cfg.risk_per_trade * RISK_SCALE, 6)
     cfg.max_portfolio_heat = min(round(cfg.max_portfolio_heat * RISK_SCALE, 4), 1.0)
@@ -106,7 +108,7 @@ def main():
     account = broker.get_account_info()
     initial_equity = account["portfolio_value"]
 
-    base_cfg = make_long_config()
+    base_cfg = make_gap_hold_config()
     news_filter = NewsFilter(api_key, secret_key)
     fetcher = BarFetcher(api_key, secret_key)
 

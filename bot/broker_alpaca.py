@@ -195,6 +195,21 @@ def is_order_filled(order_id: str) -> bool:
         return False
 
 
+def get_order_status(order_id: str) -> tuple[str, int, Optional[float]]:
+    """Return (status, filled_qty, filled_avg_price) for an order.
+
+    status is lowercased (e.g. "orderstatus.filled", "orderstatus.partially_filled",
+    "orderstatus.canceled"). filled_qty is whole shares filled so far; filled_avg_price
+    is None until at least one share fills. Used to confirm resting limit-order fills
+    instead of inferring them from bar prices.
+    """
+    order = trading_client.get_order_by_id(order_id)
+    status = str(order.status).lower()
+    filled_qty = int(float(order.filled_qty)) if order.filled_qty is not None else 0
+    avg = float(order.filled_avg_price) if order.filled_avg_price is not None else None
+    return status, filled_qty, avg
+
+
 def get_fill_price(order_id: str, max_wait_sec: float = 2.0) -> Optional[float]:
     """Poll until a market order fills and return the filled average price.
 
