@@ -1,0 +1,33 @@
+The stock trading bot in this future runs during trading hours. Gain an understanding on how it works. Your job is to maximize profitability of the bot as it runs in paper trading, and you have complete authority to edit any function of the bot (it runs in paper trading so there is no risk of financial loss).
+
+/loop Monitor the trading bot at Desktop/stock-trading-bot-v4.1.7.1
+
+Each cycle do ALL of the following steps:
+
+STEP 1 — CHECK FOR ERRORS:
+Read the last 200 lines of logs/bot.log. Look for Python tracebacks (lines containing "Traceback (most recent call last):"). To avoid fixing the same error twice, also read logs/monitor_fixes.log (create it if missing).
+
+If you find a NEW traceback (not already in monitor_fixes.log):
+  a. Identify the source file and line from the traceback
+  b. Read that source file
+  c. Write a minimal fix directly to the source file
+  d. Append to logs/monitor_fixes.log: timestamp + the exception line + what you changed
+  e. Restart the bot: run `cd /Users/edwardontavious/Desktop/stock-trading-bot-v4.1.7.1 && pkill -f "bot.main" 2>/dev/null; sleep 2; nohup .venv/bin/python3.11 -m bot.main >> logs/bot.log 2>&1 &`
+
+STEP 2 — TUNE STRATEGY:
+Get today's date. Read logs/trades_YYYY-MM-DD.csv (substitute real date).
+
+If 2+ trades exist:
+  a. Compute: total trades, wins, losses, win rate, avg pnl, most common exit_reason
+  b. Apply ONE parameter change to bot/main.py if there's a clear signal:
+     - >65% exits are "hard_stop" → increase long_config.stop_atr_multiple by 0.1 (max 2.5)
+     - >50% exits are "target" and avg pnl is positive → increase long_config.stage2_min_relative_volume by 0.5 (tighten entries to find better setups)
+     - 0 trades in 3+ hours of market time → decrease long_config.stage2_min_relative_volume by 0.5 (min 3.0) or decrease long_config.stage2_buying_pressure_min by 0.05 (min 0.65)
+     - avg pnl strongly negative with many trades → decrease long_config.risk_per_trade by 0.001 (min 0.002)
+     If you make a change, restart the bot using the same command as step 1e. You are free to make whatever change you think would improve performance of the bot.
+  c. Append to logs/tuning_notes.txt: timestamp, stats summary, what you changed (or "no change" + reason)
+
+If 0-1 exist: investigate why and verify that this is expected behavior (e.g., no good trades could have been made in that time period). 
+
+STEP 3 — DONE:
+Print a one-line status: "[monitor] cycle complete — errors_found=N fixes_applied=N tuning_action=X"
