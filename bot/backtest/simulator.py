@@ -58,6 +58,11 @@ class Simulator:
         # Short-side parameters
         short_config: Optional[V4Config] = None,
         etb_set: Optional[Set[str]] = None,
+        # Realistic fill model: cap fills at a fraction of the fill bar's volume
+        # and charge participation-proportional impact on top of slippage_pct.
+        # 0.0 disables both (legacy behavior: any size fills at quoted price).
+        max_bar_participation: float = 0.0,
+        impact_slippage_coeff: float = 0.0,
     ) -> None:
         self._config = config
         self._initial_equity = initial_equity
@@ -97,6 +102,33 @@ class Simulator:
         # Short-side state
         self._short_config = short_config
         self._etb_set: Set[str] = etb_set if etb_set is not None else set()
+        self._max_bar_participation = max_bar_participation
+        self._impact_slippage_coeff = impact_slippage_coeff
+
+    def _liquidity_fill(self, shares: int, bar: Bar) -> Tuple[int, float]:
+        """Cap shares to a fraction of the fill bar's volume; return (shares, slippage).
+
+        Slippage = slippage_pct + impact_coeff × participation, where participation
+        is the fraction of the bar's traded volume we consume (capped at 1.0).
+        With max_bar_participation=0 this is a no-op returning legacy slippage.
+        """
+        if self._max_bar_participation <= 0:
+            return shares, self._slippage_pct
+        if bar.volume <= 0:
+            return 0, self._slippage_pct
+        cap = int(bar.volume * self._max_bar_participation)
+        shares = min(shares, cap)
+        participation = min(1.0, shares / bar.volume)
+        return shares, self._slippage_pct + self._impact_slippage_coeff * participation
+
+    def _exit_slippage(self, position: Position, exit_bar: Optional[Bar]) -> float:
+        """Adverse exit slippage under the realistic fill model (0.0 when disabled)."""
+        if self._max_bar_participation <= 0 or exit_bar is None:
+            return 0.0
+        if exit_bar.volume <= 0:
+            return self._slippage_pct + self._impact_slippage_coeff
+        participation = min(1.0, position.shares / exit_bar.volume)
+        return self._slippage_pct + self._impact_slippage_coeff * participation
 
     def run_day(
         self,
@@ -200,8 +232,12 @@ class Simulator:
             # Fill pending entry at this bar's open + slippage
             if sym in pending_entries:
                 pending = pending_entries.pop(sym)
-                fill_price = round(bar.open * (1 + self._slippage_pct), 2)
                 size = pending["size"]
+                size.shares, entry_slip = self._liquidity_fill(int(size.shares), bar)
+                if size.shares <= 0:
+                    equity_curve.append((bar.timestamp, portfolio.equity))
+                    continue
+                fill_price = round(bar.open * (1 + entry_slip), 2)
                 atr_entry = pending["atr_val"]
                 stop_price = size.long_stop(fill_price)
                 target_price = size.long_target(fill_price)
@@ -252,12 +288,12 @@ class Simulator:
                     if not should_hold:
                         self._close(sym, bar.close, "eod", bar.timestamp,
                                     portfolio, open_records, closed_trades,
-                                    pos_peak, pos_trough)
+                                    pos_peak, pos_trough, exit_bar=bar)
                 # Shorts are always closed EOD — no overnight holds
                 if short_portfolio is not None and sym in short_portfolio.positions:
                     self._close(sym, bar.close, "eod", bar.timestamp,
                                 short_portfolio, short_open_records, closed_trades,
-                                short_pos_peak, short_pos_trough)
+                                short_pos_peak, short_pos_trough, exit_bar=bar)
                 equity_curve.append((bar.timestamp, portfolio.equity))
                 continue
 
@@ -282,6 +318,9 @@ class Simulator:
                         if self._max_position_dv_pct > 0 and baseline > 0:
                             dv_cap = int(self._max_position_dv_pct * baseline * 390)
                             size.shares = min(int(size.shares), dv_cap)
+                        # Limit order: no impact slippage past the limit price, but the
+                        # bar's volume still bounds how many shares can realistically fill.
+                        size.shares, _ = self._liquidity_fill(int(size.shares), bar)
                         if size.shares > 0:
                             stop_price = size.long_stop(fill_price)
                             target_price = size.long_target(fill_price)
@@ -322,11 +361,11 @@ class Simulator:
                     stop_fill = min(position.stop_price, bar.open)
                     self._close(sym, stop_fill, "hard_stop", bar.timestamp,
                                 portfolio, open_records, closed_trades,
-                                pos_peak, pos_trough)
+                                pos_peak, pos_trough, exit_bar=bar)
                 elif bar.high >= position.target_price:
                     self._close(sym, position.target_price, "target", bar.timestamp,
                                 portfolio, open_records, closed_trades,
-                                pos_peak, pos_trough)
+                                pos_peak, pos_trough, exit_bar=bar)
                 elif vwap_val is not None and baseline > 0:
                     instruction = manager.on_bar(bar, position, vwap_val, baseline)
                     if instruction:
@@ -338,7 +377,7 @@ class Simulator:
                             fill = bar.close
                         self._close(sym, fill, instruction.reason, bar.timestamp,
                                     portfolio, open_records, closed_trades,
-                                    pos_peak, pos_trough)
+                                    pos_peak, pos_trough, exit_bar=bar)
                 equity_curve.append((bar.timestamp, portfolio.equity))
                 continue
 
@@ -351,11 +390,11 @@ class Simulator:
                     stop_fill = max(position.stop_price, bar.open)
                     self._close(sym, stop_fill, "hard_stop", bar.timestamp,
                                 short_portfolio, short_open_records, closed_trades,
-                                short_pos_peak, short_pos_trough)
+                                short_pos_peak, short_pos_trough, exit_bar=bar)
                 elif bar.low <= position.target_price:
                     self._close(sym, position.target_price, "target", bar.timestamp,
                                 short_portfolio, short_open_records, closed_trades,
-                                short_pos_peak, short_pos_trough)
+                                short_pos_peak, short_pos_trough, exit_bar=bar)
                 equity_curve.append((bar.timestamp, portfolio.equity))
                 continue
 
@@ -379,8 +418,9 @@ class Simulator:
                             if self._max_position_dv_pct > 0 and baseline > 0:
                                 dv_cap = int(self._max_position_dv_pct * baseline * 390)
                                 size.shares = min(int(size.shares), dv_cap)
+                            size.shares, entry_slip = self._liquidity_fill(int(size.shares), bar)
                             if size.shares > 0:
-                                fill_price = round(bar.close * (1 + self._slippage_pct), 2)
+                                fill_price = round(bar.close * (1 + entry_slip), 2)
                                 stop_price = size.long_stop(fill_price)
                                 target_price = size.long_target(fill_price)
                                 position = Position(
@@ -489,7 +529,10 @@ class Simulator:
                         size.shares = min(int(size.shares), dv_cap)
                     if self._market_order_fill:
                         # Market order: fill at signal bar's close + slippage.
-                        fill_price = round(bar.close * (1 + self._slippage_pct), 2)
+                        size.shares, entry_slip = self._liquidity_fill(int(size.shares), bar)
+                        if size.shares <= 0:
+                            continue
+                        fill_price = round(bar.close * (1 + entry_slip), 2)
                         stop_price = size.long_stop(fill_price)
                         target_price = size.long_target(fill_price)
                         position = Position(
@@ -560,9 +603,10 @@ class Simulator:
                                     size = compute_position_size(
                                         short_portfolio.equity, atr_val, bar.close, scfg
                                     )
+                                    size.shares, entry_slip = self._liquidity_fill(int(size.shares), bar)
                                     if size.shares > 0:
                                         # Fill next bar open (like longs) — sell short with slippage
-                                        fill_price = round(bar.close * (1 - self._slippage_pct), 2)
+                                        fill_price = round(bar.close * (1 - entry_slip), 2)
                                         stop_price = size.short_stop(fill_price)
                                         target_price = size.short_target(fill_price)
                                         position = Position(
@@ -651,10 +695,17 @@ class Simulator:
         closed_trades: List[TradeRecord],
         pos_peak: Optional[Dict[str, float]] = None,
         pos_trough: Optional[Dict[str, float]] = None,
+        exit_bar: Optional[Bar] = None,
     ) -> None:
         position = portfolio.remove_position(sym)
         if not position:
             return
+        exit_slip = self._exit_slippage(position, exit_bar)
+        if exit_slip > 0:
+            if position.direction == "short":
+                fill_price = round(fill_price * (1 + exit_slip), 4)
+            else:
+                fill_price = round(fill_price * (1 - exit_slip), 4)
         if position.direction == "short":
             pnl = round((position.entry_price - fill_price) * position.shares, 2)
         else:

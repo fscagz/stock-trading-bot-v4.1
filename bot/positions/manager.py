@@ -1,9 +1,12 @@
 from __future__ import annotations
+import logging
 from dataclasses import dataclass
 from typing import Optional
 
 from bot.config import V4Config
 from bot.intraday.types import Bar, Position
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -55,16 +58,31 @@ class PositionManager:
         if bar.close <= position.stop_price:
             return ExitInstruction(reason="trailing_stop", action="market_exit")
 
+        # Change #2 (2026-06-30): once the stop is at or above entry, the position is
+        # past breakeven — the trailing stop already caps risk at ~$0, so the protective
+        # micro-exits below (vwap_break / volume_collapse / structure_break) only serve
+        # to amputate winners before the 4R target (the 6 target hits over 110 trades
+        # were the only positive bucket). Suppress them while green; KEEP them while the
+        # trade is still at risk (there they cut a loser before the full hard stop).
+        past_breakeven = position.stop_price >= position.entry_price
+
         # Layer 3a: VWAP break on elevated volume
         vwap_volume_threshold = baseline_volume_per_min * self._cfg.vwap_break_volume_ratio
         if bar.close < vwap and bar.volume >= vwap_volume_threshold:
-            return ExitInstruction(reason="vwap_break", action="limit_exit", limit_price=bar.close)
+            if past_breakeven:
+                logger.info("EXIT-SUPPRESSED %s vwap_break — past breakeven, letting trailing stop run", sym)
+            else:
+                return ExitInstruction(reason="vwap_break", action="limit_exit", limit_price=bar.close)
 
-        # Layer 3b: volume collapse
-        if position.entry_bar_volume > 0:
+        # Layer 3b: volume collapse (skip first 2 bars post-entry to avoid instant exits)
+        bars_since_entry = int((bar.timestamp - position.entry_time).total_seconds() / 60)
+        if bars_since_entry > 2 and position.entry_bar_volume > 0:
             collapse_threshold = position.entry_bar_volume * self._cfg.volume_collapse_ratio
             if bar.volume < collapse_threshold:
-                return ExitInstruction(reason="volume_collapse", action="market_exit")
+                if past_breakeven:
+                    logger.info("EXIT-SUPPRESSED %s volume_collapse — past breakeven, letting trailing stop run", sym)
+                else:
+                    return ExitInstruction(reason="volume_collapse", action="market_exit")
 
         # Layer 3c: structure break (consecutive lower high + lower low)
         prev = self._prev_bar.get(sym)
@@ -75,7 +93,10 @@ class PositionManager:
                 self._structure_break_count[sym] = 0
             if self._structure_break_count.get(sym, 0) >= self._cfg.structure_break_bars:
                 self._structure_break_count[sym] = 0
-                return ExitInstruction(reason="structure_break", action="limit_exit", limit_price=bar.close)
+                if past_breakeven:
+                    logger.info("EXIT-SUPPRESSED %s structure_break — past breakeven, letting trailing stop run", sym)
+                else:
+                    return ExitInstruction(reason="structure_break", action="limit_exit", limit_price=bar.close)
 
         self._prev_bar[sym] = bar
         return None

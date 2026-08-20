@@ -71,7 +71,8 @@ class TradeRecord:
     expected_slippage_pct: float
     exit_time: Optional[datetime] = None
     exit_price: Optional[float] = None
-    actual_slippage_pct: Optional[float] = None
+    actual_slippage_pct: Optional[float] = None  # exit slip: (actual_exit - theoretical_exit) / entry
+    entry_slippage_pct: Optional[float] = None   # entry slip: (actual_fill - signal_price) / signal_price
     pnl: Optional[float] = None
     exit_reason: Optional[str] = None   # "stop" | "target" | "eod_close" | "kill_switch"
     ml_score: Optional[float] = None

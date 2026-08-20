@@ -332,7 +332,6 @@ class BacktestSimulator:
             signals=[s.signal_type for s in signals],
             sector="Unknown", regime=self._regime.value,
             portfolio_heat_at_entry=self._portfolio.portfolio_heat_pct,
-            expected_slippage_pct=self._cfg.expected_entry_slippage_pct,
         )
         self._trade_logger.log_entry(record)
         logger.debug("ENTRY %s %s %d@%.2f stop=%.2f target=%.2f",

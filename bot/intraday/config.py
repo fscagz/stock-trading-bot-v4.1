@@ -13,14 +13,12 @@ class IntradayConfig:
     max_open_positions: int = 5
     max_sector_positions: int = 2
     max_position_correlation: float = 0.7
+    max_bar_participation_pct: float = 0.0  # 0 = disabled; else cap shares at this fraction of entry-bar volume
 
     # --- Execution ---
     limit_offset_pct: float = 0.0005     # bid+0.05% for longs; ask-0.05% for shorts
     fill_timeout_seconds: int = 30
     min_fill_ratio: float = 0.80         # cancel remainder if < 80% filled
-    expected_entry_slippage_pct: float = 0.0005
-    expected_exit_slippage_pct: float = 0.001
-    slippage_kill_multiple: float = 2.0
 
     # --- Session windows (ET) ---
     session_start: str = "09:45"
@@ -28,6 +26,7 @@ class IntradayConfig:
     eod_close: str = "15:45"
 
     # --- Cooldown ---
+    cooldown_enabled: bool = True
     consecutive_loss_trigger: int = 3
     consecutive_loss_cooldown_minutes: int = 30
 

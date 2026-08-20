@@ -34,6 +34,7 @@ PB_ATR, PB_TTL, PB_TARGET = 2.0, 60, 2.5
 CHASE_TARGET = 4.0
 DV_CAP = 0.20
 DV = 10_000_000
+SLIPPAGE = 0.002   # 0.2% per-side
 GAP_HOLD_BARS = 15
 GAP_HOLD_TOLERANCE = 0.02
 
@@ -99,7 +100,7 @@ def run_period(cfg, start, end, screener, fetcher, initial_equity, news_filter,
 
     sim = Simulator(
         cfg, initial_equity,
-        slippage_pct=0.001,
+        slippage_pct=SLIPPAGE,
         overnight_holds=False,
         market_order_fill=True,
         news_filter=news_filter,

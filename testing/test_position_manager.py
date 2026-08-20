@@ -71,10 +71,19 @@ def test_vwap_break_triggers_limit_exit():
 def test_volume_collapse_triggers_exit():
     mgr = _make_manager()
     pos = _position(entry_price=2.00, stop_price=1.70, entry_bar_volume=200_000)
-    bar = _bar(close=2.10, volume=80_000)  # 80k < 0.5 × 200k = 100k
+    # volume collapse is skipped for the first 2 minutes post-entry
+    bar = _bar(close=2.10, volume=80_000, ts=_now(minute=5))  # 80k < 0.5 × 200k = 100k
     result = mgr.on_bar(bar, pos, vwap=2.05, baseline_volume_per_min=50_000)
     assert result is not None
     assert result.reason == "volume_collapse"
+
+
+def test_volume_collapse_skipped_immediately_after_entry():
+    mgr = _make_manager()
+    pos = _position(entry_price=2.00, stop_price=1.70, entry_bar_volume=200_000)
+    bar = _bar(close=2.10, volume=80_000)  # same minute as entry — too early to judge
+    result = mgr.on_bar(bar, pos, vwap=2.05, baseline_volume_per_min=50_000)
+    assert result is None
 
 
 def test_overnight_hold_returns_true_when_conditions_met():

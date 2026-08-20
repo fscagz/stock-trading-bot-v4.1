@@ -16,8 +16,6 @@ class PortfolioState:
     consecutive_losses: int = 0
     cooldown_until: Optional[datetime] = None
     kill_switch_active: bool = False
-    session_slippage_actual: float = 0.0
-    session_slippage_expected: float = 0.0
 
     def __post_init__(self) -> None:
         if self.session_start_equity == 0.0:

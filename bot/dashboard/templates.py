@@ -280,8 +280,9 @@ function dirPill(d) {
 
 // ── Updaters ─────────────────────────────────────────────────
 function updateHeader(d) {
-  var approxEquity = d.equity + d.day_pnl;
-  document.getElementById('h-equity').textContent = '$' + fmt2(approxEquity);
+  // equity tracks realized PnL; add only unrealized to get current mark-to-market
+  var currentEquity = d.equity + (d.unrealized_pnl || 0);
+  document.getElementById('h-equity').textContent = '$' + fmt2(currentEquity);
   document.getElementById('h-cash').textContent = '$' + fmt2(d.cash);
 
   var pnlEl = document.getElementById('h-pnl');

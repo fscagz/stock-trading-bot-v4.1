@@ -22,18 +22,26 @@ _SMART = "SMART"
 _USD = "USD"
 
 
+_BAR_SIZE_MAP: Dict[int, str] = {
+    5:  "5 secs",
+    10: "10 secs",
+    15: "15 secs",
+    30: "30 secs",
+    60: "1 min",
+}
+
+
 class BarStream:
-    """Subscribes to IBKR 1-minute bars via IB Gateway and emits completed
-    Bar objects to the registered handler.
+    """Subscribes to IBKR bars via IB Gateway and emits completed Bar objects.
 
     Uses reqHistoricalData(keepUpToDate=True) which requires only the standard
     exchange market data subscription (no separate streaming permission needed).
-    Each completed 1-minute bar is emitted when the next minute begins.
+    Each completed bar is emitted when the next bar period begins.
 
     Requires a locally running IB Gateway (port 4001 live, 4002 paper).
 
     Usage:
-        stream = BarStream(host, port, client_id, symbols)
+        stream = BarStream(host, port, client_id, symbols, bar_size_seconds=30)
         stream.set_handler(my_handler)
         stream.run()   # blocks; run in a thread or main loop
 
@@ -46,6 +54,7 @@ class BarStream:
         port: int,
         client_id: int,
         symbols: List[str],
+        bar_size_seconds: int = 60,
     ) -> None:
         self._host = host
         self._port = port
@@ -56,6 +65,11 @@ class BarStream:
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         # symbol -> (BarDataList, callback) — kept so we can unsubscribe cleanly
         self._bar_lists: Dict[str, Tuple] = {}
+        self._bar_size_seconds = bar_size_seconds
+        self._ibkr_bar_size = _BAR_SIZE_MAP.get(bar_size_seconds, "1 min")
+        # Request enough history to seed the indicator buffers: 1 hour is plenty
+        # for any supported bar size and keeps the initial load fast.
+        self._duration_str = "3600 S"
 
     @property
     def symbols(self) -> Set[str]:
@@ -99,8 +113,8 @@ class BarStream:
                 self._ib.reqHistoricalDataAsync(
                     contract,
                     endDateTime="",
-                    durationStr="3600 S",
-                    barSizeSetting="1 min",
+                    durationStr=self._duration_str,
+                    barSizeSetting=self._ibkr_bar_size,
                     whatToShow="TRADES",
                     useRTH=True,
                     formatDate=2,
@@ -120,7 +134,7 @@ class BarStream:
             return
 
         def on_update(bars, has_new_bar: bool) -> None:
-            # has_new_bar=True means a new minute just started — bars[-2] is the
+            # has_new_bar=True means a new bar period started — bars[-2] is the
             # just-completed bar; bars[-1] is the new incomplete bar being built.
             if not has_new_bar or len(bars) < 2 or not self._handler:
                 return
@@ -143,7 +157,7 @@ class BarStream:
 
         bar_list.updateEvent += on_update
         self._bar_lists[symbol] = (bar_list, on_update)
-        logger.debug("IBKR: subscribed to 1-min bars for %s", symbol)
+        logger.debug("IBKR: subscribed to %s bars for %s", self._ibkr_bar_size, symbol)
 
     def run(self, stop_event: Optional[threading.Event] = None) -> None:
         if not _HAVE_IBKR:

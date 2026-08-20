@@ -1,7 +1,15 @@
 from __future__ import annotations
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Optional
 from bot.intraday.config import IntradayConfig
+
+# Cache root for the systematic (factor) pipeline: data/store.py,
+# data/simfin_loader.py and data/fundamental_store.py all resolve their
+# subdirectories under this. Those modules were ported from an earlier
+# systematic project whose config defined CACHE_DIR; without it they raise
+# ImportError on load.
+CACHE_DIR = Path(__file__).resolve().parent.parent / "data_cache"
 
 
 @dataclass
@@ -9,6 +17,7 @@ class V4Config(IntradayConfig):
     # --- V4 overrides of V3 defaults ---
     max_open_positions: int = 15
     max_sector_positions: int = 15
+    max_gap_hold_entries_per_day: int = 0   # 0 = unlimited; set >0 to cap total gap-hold entries/session
     min_price: float = 0.50
     max_price: float = float("inf")
     max_spread_pct: float = 0.01
@@ -20,11 +29,20 @@ class V4Config(IntradayConfig):
     scanner_interval_seconds: int = 30
     scanner_top_n: int = 50
 
+    # --- Bar resolution ---
+    # Controls the IBKR bar size for live streaming. Backtests always use 1-min
+    # Alpaca bars regardless of this value (Alpaca has no sub-minute history).
+    # Supported values: 5, 10, 15, 30, 60 (seconds). Anything else falls back to 60.
+    bar_size_seconds: int = 60
+
     # --- Stage 1 filter ---
     stage1_min_price_change_pct: float = 0.05
     stage1_min_price: float = 0.50
 
     # --- Stage 2 momentum validation ---
+    # Keep this consistent with bar_size_seconds:
+    #   bar_size_seconds=60 → 5 bars = 5 min confirmation window
+    #   bar_size_seconds=30 → 8 bars = 4 min confirmation window (similar quality)
     stage2_roc_lookback_bars: int = 5
     stage2_roc_min_pct: float = 0.03
     stage2_min_relative_volume: float = 4.0
@@ -118,10 +136,12 @@ def make_standard_config() -> V4Config:
     cfg.confidence_tier2_multiplier = 2.0
     cfg.confidence_tier3_multiplier = 3.0
     cfg.confidence_tier4_multiplier = 4.0
-    # vol_score = 1.0 at 80× rel-vol (8× the 10× min); roc_score = 1.0 at 35% ROC (5× the 7% min)
     cfg.confidence_score_roc_range_mult = 4.0
     cfg.confidence_score_vol_range_mult = 7.0
     cfg.min_avg_dollar_volume = 10_000_000
+    # 30-second bars, 8-bar lookback ≈ 4-min confirmation window
+    cfg.bar_size_seconds = 30
+    cfg.stage2_roc_lookback_bars = 8
     return cfg
 
 
@@ -146,10 +166,18 @@ def make_gap_hold_config() -> V4Config:
     cfg.confidence_tier2_multiplier = 2.0
     cfg.confidence_tier3_multiplier = 3.0
     cfg.confidence_tier4_multiplier = 4.0
-    # vol_score = 1.0 at 48× rel-vol (8× the 6× min); roc_score = 1.0 at 35% ROC (5× the 7% min)
     cfg.confidence_score_roc_range_mult = 4.0
     cfg.confidence_score_vol_range_mult = 7.0
     cfg.min_avg_dollar_volume = 10_000_000
+    # 15-second bars with all bar counts scaled to preserve the same time windows:
+    #   stage2_roc_lookback: 16×15s = 4 min  (was 8×30s = 4 min)
+    #   gap_hold_bars:       30×15s = 7.5 min (was 15×30s = 7.5 min) — computed in LiveRunner
+    #   hod_rej_bars:        20×15s = 5 min   (was 10×30s = 5 min)   — computed in LiveRunner
+    #   structure_break:     4×15s  = 60s     (was 2×30s  = 60s)
+    # First proper 15s run: 2026-06-26 (prior attempt 2026-06-25 lacked scaled bar counts)
+    cfg.bar_size_seconds = 15
+    cfg.stage2_roc_lookback_bars = 16
+    cfg.structure_break_bars = 4
     return cfg
 
 

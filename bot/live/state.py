@@ -45,7 +45,7 @@ class SessionState:
     def _save(self) -> None:
         try:
             with self._path.open("w") as f:
-                json.dump(self._data, f, indent=2)
+                json.dump(self._data, f, indent=2, default=str)
         except Exception as exc:
             logger.error("Could not write session state to %s: %s", self._path, exc)
 
@@ -80,7 +80,7 @@ class SessionState:
             "sector": position.sector,
             "highest_close": position.highest_close,
             "entry_bar_volume": position.entry_bar_volume,
-            "stop_order_id": position.stop_order_id,
+            "stop_order_id": str(position.stop_order_id) if position.stop_order_id else "",
         }
         self._save()
         logger.debug("SessionState: saved position %s", position.ticker)
@@ -103,6 +103,21 @@ class SessionState:
         if removed is not None:
             self._save()
             logger.debug("SessionState: removed position %s", ticker)
+
+    def save_gap_losses(self, losses: dict, entered_today: set) -> None:
+        """Persist same-day gap-hold loss counts and entered symbols for mid-day restart recovery."""
+        self._ensure_today()
+        self._data["gap_hold_losses"] = {k: int(v) for k, v in losses.items()}
+        self._data["entered_today"] = sorted(entered_today)
+        self._save()
+
+    def get_gap_losses(self) -> "tuple[dict, set]":
+        """Return persisted gap losses and entered_today if the saved file is from today."""
+        if not self.is_today:
+            return {}, set()
+        losses = {k: int(v) for k, v in self._data.get("gap_hold_losses", {}).items()}
+        entered = set(self._data.get("entered_today", []))
+        return losses, entered
 
     def restore_position(self, ticker: str) -> Optional[Position]:
         """Reconstruct a Position from saved state. Returns None if not found or corrupt."""

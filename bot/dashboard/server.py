@@ -34,6 +34,7 @@ def create_app(state: DashboardState) -> FastAPI:
             )
             day_pnl = round(realized_pnl + unrealized_pnl, 2)
             day_pnl_pct = round(day_pnl / state.equity, 6) if state.equity > 0 else 0.0
+            unrealized_pnl_rounded = round(unrealized_pnl, 2)
 
             positions = []
             for ticker, pos in state.positions.items():
@@ -72,6 +73,8 @@ def create_app(state: DashboardState) -> FastAPI:
                     "shares": r.shares,
                     "pnl": round(r.pnl, 2) if r.pnl is not None else None,
                     "exit_reason": r.exit_reason,
+                    "entry_slippage_pct": round(r.entry_slippage_pct * 100, 3) if r.entry_slippage_pct is not None else None,
+                    "exit_slippage_pct": round(r.actual_slippage_pct * 100, 3) if r.actual_slippage_pct is not None else None,
                 })
             closed.sort(key=lambda t: t["exit_time"] or "", reverse=True)
 
@@ -91,6 +94,7 @@ def create_app(state: DashboardState) -> FastAPI:
                 "is_paper": state.is_paper,
                 "day_pnl": day_pnl,
                 "day_pnl_pct": day_pnl_pct,
+                "unrealized_pnl": unrealized_pnl_rounded,
                 "regime_uptrend": state.regime_uptrend,
                 "kill_switch_active": state.kill_switch_active,
                 "portfolio_heat_pct": round(state.portfolio_heat_pct, 4),

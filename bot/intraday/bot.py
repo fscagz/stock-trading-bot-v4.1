@@ -512,8 +512,6 @@ class IntradayBot:
             sector=sector, open_risk=open_risk,
         )
         self._portfolio.add_position(position)
-        self._portfolio.session_slippage_expected += self._cfg.expected_entry_slippage_pct
-        self._portfolio.session_slippage_actual += fill.slippage_pct
 
         # Log entry
         record = TradeRecord(
@@ -524,7 +522,6 @@ class IntradayBot:
             signals=[s.signal_type for s in signals],
             sector=sector, regime=self._current_regime.value,
             portfolio_heat_at_entry=self._portfolio.portfolio_heat_pct,
-            expected_slippage_pct=self._cfg.expected_entry_slippage_pct,
             ml_score=ml_probability,
         )
         self._trade_logger.log_entry(record)
@@ -571,7 +568,7 @@ class IntradayBot:
                     exit_price=exit_price,
                     exit_time=now,
                     exit_reason="eod_close",
-                    actual_slippage_pct=self._cfg.expected_exit_slippage_pct,
+                    actual_slippage_pct=0.0,
                 )
                 self._portfolio.remove_position(ticker)
 

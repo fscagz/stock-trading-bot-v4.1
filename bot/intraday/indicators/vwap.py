@@ -25,6 +25,8 @@ class VWAPIndicator:
         self._cum_pv[sym] += bar.typical_price * bar.volume
         self._cum_vol[sym] += bar.volume
 
+        if self._cum_vol[sym] == 0.0:
+            return bar.typical_price
         return self._cum_pv[sym] / self._cum_vol[sym]
 
     def get(self, symbol: str) -> Optional[float]:
