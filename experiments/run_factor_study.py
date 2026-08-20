@@ -113,6 +113,86 @@ def build_factors(close: pd.DataFrame, dvol: pd.DataFrame, rb: pd.DatetimeIndex)
     }
 
 
+def build_fundamental_factors(close: pd.DataFrame, rb: pd.DatetimeIndex):
+    """Value/quality factors from the SimFin point-in-time store.
+
+    Point-in-time discipline: for each rebalance date we take the latest filing
+    whose FILING date (not fiscal period end) is on or before that date, via a
+    backward merge_asof. Using period_end_date would leak — a Dec-31 fiscal year
+    is not public until the 10-K is filed months later.
+
+    Returns {} when the store is empty or SIMFIN_API_KEY is unset, so the caller
+    degrades to price-only factors rather than failing.
+    """
+    try:
+        from data.fundamental_store import load_fundamentals
+        f = load_fundamentals(source="simfin")
+    except Exception as exc:
+        log(f"fundamentals unavailable ({type(exc).__name__}: {exc}) — price factors only")
+        return {}
+    if f is None or f.empty:
+        log("fundamental store is empty — price factors only")
+        return {}
+
+    f = f.copy()
+    # merge_asof requires identical datetime resolution on both keys; the store
+    # round-trips through Parquet as datetime64[s] while the price index is [ns].
+    f["filing_date"] = pd.to_datetime(f["filing_date"]).astype("datetime64[ns]")
+    f = f.dropna(subset=["filing_date", "ticker"]).sort_values("filing_date")
+    rb = pd.DatetimeIndex(rb).astype("datetime64[ns]")
+
+    tickers = [t for t in close.columns if t != BENCH]
+    # as-of join each rebalance date against each ticker's filing history
+    frames = []
+    for tkr, g in f[f["ticker"].isin(tickers)].groupby("ticker", sort=False):
+        g = g.sort_values("filing_date")
+        j = pd.merge_asof(
+            pd.DataFrame({"filing_date": rb}), g,
+            on="filing_date", direction="backward",
+        )
+        # annual filings arrive ~yearly; anything older than ~500 days is stale.
+        # (fundamental_store's own 180-day default would discard nearly every
+        # annual filing, since consecutive 10-Ks are ~365 days apart.)
+        age = (rb - j["filing_date"]).dt.days
+        stale = age.isna() | (age > 500)
+        val_cols = [c for c in j.columns if c not in ("filing_date", "ticker")]
+        j.loc[stale.values, val_cols] = np.nan
+        j["ticker"] = tkr
+        j.index = rb
+        frames.append(j)
+    if not frames:
+        return {}
+    panel = pd.concat(frames)
+
+    def wide(col):
+        if col not in panel.columns:
+            return pd.DataFrame(index=rb, columns=tickers, dtype=float)
+        return panel.pivot_table(index=panel.index, columns="ticker", values=col,
+                                 aggfunc="last").reindex(index=rb, columns=tickers)
+
+    px = close.reindex(rb)[tickers]
+    eps, ni = wide("eps_diluted"), wide("net_income")
+    equity, revenue = wide("total_equity"), wide("revenue")
+    gp, debt = wide("gross_profit"), wide("total_debt")
+    fcf, sh = wide("free_cash_flow"), wide("shares_diluted")
+    mcap = px * sh
+
+    covered = eps.notna().sum(axis=1)
+    log(f"fundamental coverage: median {covered.median():.0f} names/rebalance "
+        f"(max {covered.max():.0f})")
+
+    return {
+        # value — higher = cheaper
+        "earnings_yield": eps / px.replace(0, np.nan),
+        "book_to_price": equity / mcap.replace(0, np.nan),
+        "fcf_yield": fcf / mcap.replace(0, np.nan),
+        # quality — higher = better
+        "roe": ni / equity.where(equity > 0),
+        "gross_margin": gp / revenue.where(revenue > 0),
+        "low_leverage": -(debt / equity.where(equity > 0)),
+    }
+
+
 def universe_masks(close: pd.DataFrame, dvol: pd.DataFrame, rb: pd.DatetimeIndex):
     px = close.reindex(rb)
     liq = dvol.rolling(20).mean().reindex(rb)
@@ -204,6 +284,8 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--top-pct", type=float, default=0.10, help="top fraction held (0.10 = decile)")
     ap.add_argument("--cost-bps", type=float, default=20.0, help="one-way cost per unit turnover")
+    ap.add_argument("--fundamentals", action="store_true",
+                    help="add SimFin value/quality factors (needs SIMFIN_API_KEY + built store)")
     args = ap.parse_args()
 
     close, dvol = build_panels()
@@ -214,6 +296,21 @@ def main():
     bench_d = close[BENCH].pct_change().dropna() if BENCH in close else pd.Series(dtype=float)
 
     factors = build_factors(close, dvol, rb)
+    if args.fundamentals:
+        fund = build_fundamental_factors(close, rb)
+        if fund:
+            # Fundamentals only exist for part of the price history; restrict the
+            # whole study to that span so price and fundamental factors are
+            # compared over the SAME rebalances rather than different samples.
+            any_cov = pd.concat([v.notna().sum(axis=1) for v in fund.values()], axis=1).max(axis=1)
+            live = any_cov[any_cov >= 30].index
+            if len(live) >= 12:
+                log(f"restricting study to fundamental-covered span: "
+                    f"{live[0].date()} → {live[-1].date()} ({len(live)} rebalances)")
+                rb = pd.DatetimeIndex(live)
+                factors = build_factors(close, dvol, rb)
+                fund = build_fundamental_factors(close, rb)
+            factors.update(fund)
     masks = universe_masks(close, dvol, rb)
 
     all_res = {}

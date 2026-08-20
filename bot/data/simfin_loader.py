@@ -45,9 +45,19 @@ try:
     from simfin.names import (
         TICKER, PUBLISH_DATE, REPORT_DATE, FISCAL_YEAR, FISCAL_PERIOD,
         REVENUE, NET_INCOME, EPS_DILUTED, GROSS_PROFIT, EBITDA,
-        TOTAL_ASSETS, TOTAL_EQUITY, TOTAL_DEBT, FREE_CASH_FLOW,
+        TOTAL_ASSETS, TOTAL_EQUITY, TOTAL_DEBT,
         SHARES_DILUTED, TOTAL_LIABILITIES,
+        NET_CASH_OPS, CAPEX,
     )
+    # simfin>=1.0 has no FREE_CASH_FLOW constant, and 'Free Cash Flow' is a
+    # column of the *derived* dataset, not of the raw cash-flow statement this
+    # module downloads. Importing it unconditionally made the whole block raise
+    # ImportError, silently setting _SIMFIN_AVAILABLE=False and surfacing later
+    # as a misleading "simfin is not installed". Derive it instead:
+    #   FCF = Net Cash from Operating Activities + Change in Fixed Assets
+    # (CAPEX is reported negative, so this is a sum, not a difference.)
+    FREE_CASH_FLOW = getattr(__import__("simfin.names", fromlist=["FCF"]), "FCF",
+                             "Free Cash Flow")
     _SIMFIN_AVAILABLE = True
 except ImportError:
     _SIMFIN_AVAILABLE = False
@@ -68,10 +78,23 @@ _COLUMN_MAP = {
     TOTAL_EQUITY if _SIMFIN_AVAILABLE else "Total Equity": "total_equity",
     TOTAL_DEBT if _SIMFIN_AVAILABLE else "Total Debt": "total_debt",
     FREE_CASH_FLOW if _SIMFIN_AVAILABLE else "Free Cash Flow": "free_cash_flow",
+    # Needed to turn per-share figures into market-cap-relative ones
+    # (book-to-price, FCF yield) at a given price.
+    SHARES_DILUTED if _SIMFIN_AVAILABLE else "Shares (Diluted)": "shares_diluted",
 }
 
 _FISCAL_PERIOD_COL = FISCAL_PERIOD if _SIMFIN_AVAILABLE else "Fiscal Period"
-_ANNUAL_PERIOD = "FY"  # SimFin label for full-year filings
+
+# SimFin is NOT consistent about how it labels full-year rows across statement
+# types: in the us-income-annual dataset Fiscal Period is 'FY', but in
+# us-balance-annual and us-cashflow-annual it is 'Q4' (the balance sheet is a
+# point-in-time snapshot taken at the fiscal year end). Filtering everything on
+# 'FY' silently reduced the balance sheet to ZERO rows, so every balance-sheet
+# field merged in as NaN and ROE / debt-to-equity were unusable — with no error
+# raised anywhere. Accept both labels. (We already request variant='annual', so
+# this filter is only guarding against stray rows.)
+_ANNUAL_PERIOD = "FY"
+_ANNUAL_PERIODS = ("FY", "Q4")
 
 
 def _require_simfin() -> None:
@@ -173,11 +196,24 @@ def build_fundamental_store(
     balance = balance.reset_index()
     cashflow = cashflow.reset_index()
 
-    # Filter to annual periods only
-    if _FISCAL_PERIOD_COL in income.columns:
-        income = income[income[_FISCAL_PERIOD_COL] == _ANNUAL_PERIOD]
-        balance = balance[balance[_FISCAL_PERIOD_COL] == _ANNUAL_PERIOD]
-        cashflow = cashflow[cashflow[_FISCAL_PERIOD_COL] == _ANNUAL_PERIOD]
+    # Filter to annual periods only. See _ANNUAL_PERIODS: income uses 'FY',
+    # balance/cashflow use 'Q4' for the same full-year filing.
+    for _df_name, _df in (("income", income), ("balance", balance), ("cashflow", cashflow)):
+        if _FISCAL_PERIOD_COL in _df.columns:
+            kept = _df[_df[_FISCAL_PERIOD_COL].isin(_ANNUAL_PERIODS)]
+            if kept.empty and not _df.empty:
+                warnings.warn(
+                    f"SimFin {_df_name}: fiscal-period filter removed every row "
+                    f"(labels present: {sorted(set(_df[_FISCAL_PERIOD_COL].dropna().unique()))[:5]}). "
+                    "Using unfiltered data."
+                )
+                kept = _df
+            if _df_name == "income":
+                income = kept
+            elif _df_name == "balance":
+                balance = kept
+            else:
+                cashflow = kept
 
     ticker_col = TICKER if _SIMFIN_AVAILABLE else "Ticker"
     publish_col = PUBLISH_DATE if _SIMFIN_AVAILABLE else "Publish Date"
@@ -190,25 +226,58 @@ def build_fundamental_store(
         keep = [c for c in merge_keys + extra_cols if c in df.columns]
         return df[keep]
 
+    # SimFin's free annual statements do not ship EPS-diluted, EBITDA or
+    # Total Debt as columns (they live in the paid 'Derived Figures' dataset).
+    # Derive them from raw line items that ARE present, so quality/value factors
+    # are not silently dropped.
+    _shares = "Shares (Diluted)"
+    _op_inc = "Operating Income (Loss)"
+    _dep_amort = "Depreciation & Amortization"
+    _ni = NET_INCOME if _SIMFIN_AVAILABLE else "Net Income"
+    _eps = EPS_DILUTED if _SIMFIN_AVAILABLE else "EPS Diluted"
+    _ebitda = EBITDA if _SIMFIN_AVAILABLE else "EBITDA"
+
+    if _eps not in income.columns and {_ni, _shares} <= set(income.columns):
+        income = income.copy()
+        income[_eps] = income[_ni] / income[_shares].replace(0, pd.NA)
+    if _ebitda not in income.columns and {_op_inc, _dep_amort} <= set(income.columns):
+        income = income.copy() if _eps in income.columns else income
+        # D&A is reported negative in SimFin's income statement; EBITDA adds it back.
+        income[_ebitda] = income[_op_inc] - income[_dep_amort]
+
+    _st_debt, _lt_debt = "Short Term Debt", "Long Term Debt"
+    _td = TOTAL_DEBT if _SIMFIN_AVAILABLE else "Total Debt"
+    if _td not in balance.columns and {_st_debt, _lt_debt} <= set(balance.columns):
+        balance = balance.copy()
+        balance[_td] = (balance[_st_debt].fillna(0) + balance[_lt_debt].fillna(0))
+
     income_cols = [
         REVENUE if _SIMFIN_AVAILABLE else "Revenue",
-        NET_INCOME if _SIMFIN_AVAILABLE else "Net Income",
-        EPS_DILUTED if _SIMFIN_AVAILABLE else "EPS Diluted",
+        _ni, _eps, _shares,
         GROSS_PROFIT if _SIMFIN_AVAILABLE else "Gross Profit",
-        EBITDA if _SIMFIN_AVAILABLE else "EBITDA",
+        _ebitda,
     ]
     balance_cols = [
         TOTAL_ASSETS if _SIMFIN_AVAILABLE else "Total Assets",
         TOTAL_EQUITY if _SIMFIN_AVAILABLE else "Total Equity",
-        TOTAL_DEBT if _SIMFIN_AVAILABLE else "Total Debt",
+        _td,
     ]
-    cashflow_cols = [
-        FREE_CASH_FLOW if _SIMFIN_AVAILABLE else "Free Cash Flow",
-    ]
+    # The raw cash-flow statement has no 'Free Cash Flow' column (that lives in
+    # SimFin's *derived* dataset). Take it if present, otherwise derive it from
+    # the two raw components below.
+    _ops = NET_CASH_OPS if _SIMFIN_AVAILABLE else "Net Cash from Operating Activities"
+    _capex = CAPEX if _SIMFIN_AVAILABLE else "Change in Fixed Assets & Intangibles"
+    _fcf = FREE_CASH_FLOW if _SIMFIN_AVAILABLE else "Free Cash Flow"
+    cashflow_cols = [_fcf, _ops, _capex]
 
     inc = _select(income, income_cols)
     bal = _select(balance, balance_cols)
     cf = _select(cashflow, cashflow_cols)
+
+    if _fcf not in cf.columns and {_ops, _capex} <= set(cf.columns):
+        # CAPEX is reported as a negative number, so this is a sum.
+        cf[_fcf] = cf[_ops] + cf[_capex]
+    cf = cf[[c for c in cf.columns if c not in (_ops, _capex)]]
 
     merged = inc.merge(bal, on=merge_keys, how="left")
     merged = merged.merge(cf, on=merge_keys, how="left")

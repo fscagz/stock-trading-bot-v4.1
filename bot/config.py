@@ -1,15 +1,38 @@
 from __future__ import annotations
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
+
 from bot.intraday.config import IntradayConfig
+
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+
+# Load .env so credentials are available whether the process was started from
+# the repo root, from bot/, or by pytest. override=False keeps any real shell
+# environment authoritative over the file.
+try:
+    from dotenv import load_dotenv
+
+    load_dotenv(_REPO_ROOT / ".env", override=False)
+except ImportError:  # python-dotenv is optional for import-only use
+    pass
 
 # Cache root for the systematic (factor) pipeline: data/store.py,
 # data/simfin_loader.py and data/fundamental_store.py all resolve their
 # subdirectories under this. Those modules were ported from an earlier
 # systematic project whose config defined CACHE_DIR; without it they raise
 # ImportError on load.
-CACHE_DIR = Path(__file__).resolve().parent.parent / "data_cache"
+CACHE_DIR = _REPO_ROOT / "data_cache"
+
+# Optional data-provider credentials for the systematic pipeline. Empty string
+# (not None) so callers can do a plain falsy check. NEVER hardcode these —
+# they belong in .env, which is gitignored.
+SIMFIN_API_KEY = os.getenv("SIMFIN_API_KEY", "")
+EODHD_API_KEY = os.getenv("EODHD_API_KEY", "")
+FRED_API_KEY = os.getenv("FRED_API_KEY", "")
+BOT_USE_SIMFIN = os.getenv("BOT_USE_SIMFIN", "true").lower() == "true"
+BOT_USE_EODHD = os.getenv("BOT_USE_EODHD", "false").lower() == "true"
 
 
 @dataclass

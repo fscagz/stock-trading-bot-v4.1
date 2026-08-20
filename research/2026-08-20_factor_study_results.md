@@ -133,6 +133,92 @@ than a tradeable property.
 - Trades assume execution at the rebalance close; next-open execution would be more conservative.
 - 83 rebalances / 7 years is a short sample for factor inference.
 
+## 6b. UPDATE — fundamentals wired in (SimFin free tier)
+
+SimFin key added; `simfin` installed; bulk download + point-in-time store now working.
+Run with `experiments/run_factor_study.py --fundamentals`.
+
+### Three loader bugs found and fixed (all silent — none raised an error)
+
+1. **`FREE_CASH_FLOW` does not exist in `simfin.names` (>=1.0).** The whole
+   `from simfin.names import (...)` block raised ImportError, setting
+   `_SIMFIN_AVAILABLE = False`, which surfaced later as a misleading
+   *"simfin is not installed"*. Now derived: `FCF = Net Cash from Operating
+   Activities + Change in Fixed Assets` (capex is negative, so a sum).
+2. **The annual balance sheet labels its fiscal period `Q4`, not `FY`.** The
+   hardcoded `== "FY"` filter reduced the balance sheet to **zero rows**, so
+   `total_assets` / `total_equity` merged in as 100% NaN and every quality
+   factor (ROE, leverage) was silently unusable. Now accepts both labels, with
+   a warning if a filter would empty a frame.
+3. **`EPS Diluted`, `EBITDA` and `Total Debt` are not columns of the free
+   annual statements** (they live in the paid Derived Figures dataset). Now
+   derived from raw line items. Coverage after fixes: total_assets/equity/debt
+   95.9%, eps_diluted 98.3%, fcf 90.5%, ebitda 39.7%.
+
+Also added `shares_diluted` to the store (needed for market-cap-relative
+factors) and `CACHE_DIR`/`SIMFIN_API_KEY` to `bot/config.py` with `.env` loading.
+
+### Coverage reality
+
+Free tier gives **~3,000–3,600 annual filings/year for 2021–2025 only**. Against
+a price cache ending 2025-01, the usable window is **48 monthly rebalances
+(2021-02 → 2025-01)** with median ~1,600 covered names per rebalance. The study
+auto-restricts to this span so price and fundamental factors are compared on the
+same sample.
+
+### Results, fundamental factors (48–51 rebalances; SPY same span: CAGR 12.84%, Sharpe 0.82, MaxDD −25.4%)
+
+Liquid large/mid — nothing beat SPY:
+
+| Factor | IC t | CAGR % | Sharpe |
+|---|---|---|---|
+| earnings_yield | 3.20 | 11.11 | 0.56 |
+| fcf_yield | 3.19 | 9.17 | 0.48 |
+| roe | 3.31 | 7.96 | 0.49 |
+| low_leverage | −2.67 | −8.44 | −0.25 |
+
+(`low_leverage` being significantly *negative* means levered names outperformed
+over 2021–2025 — a regime artifact of that window, not a durable finding.)
+
+Micro-cap — one cell beat SPY:
+
+| Factor | IC t | CAGR % | Sharpe | MaxDD % |
+|---|---|---|---|---|
+| **fcf_yield** | **4.75** | **20.93** | **0.89** | **−22.4** |
+| book_to_price | 1.28 | 13.74 | 0.55 | −30.6 |
+| momentum_12_1 | 4.36 | 12.68 | 0.55 | −38.1 |
+| roe | 3.99 | −7.37 | −0.24 | −42.6 |
+
+### Micro-cap FCF yield against the standing acceptance test
+
+| Check | Result | Verdict |
+|---|---|---|
+| Beats SPY | 20.93% vs 12.41% CAGR | pass |
+| Survives costs | +14.84% CAGR even at 100 bps | **pass** |
+| Bear-market behaviour | 2022: **+9.35%** vs SPY −9.65% | **pass** |
+| Beat SPY per year | 3 of 5 | marginal |
+| Statistical significance | excess +0.751%/mo, **t = +1.00** | **fail** |
+| Profit concentration | **top 3 of 48 months = 51% of return** | **fail** |
+| Ex-top-3 CAGR | **+8.85%** — below SPY's 12.41% | **fail** |
+
+**Verdict: does NOT clear the bar.** Removing 3 months out of 48 drops it below
+the benchmark, and the excess is not statistically distinguishable from zero.
+This is the same concentration signature that killed the previous four
+strategies — milder here (54% hit rate, cost-robust, genuinely defensive in
+2022) but present.
+
+It is nonetheless the **most promising result found in this project so far**, and
+unlike the earlier candidates it is not obviously a fill/liquidity artifact. The
+binding constraint is now sample size: 48 rebalances cannot separate a real
+effect from noise, and survivorship bias is at its worst in a long-only
+micro-cap portfolio.
+
+### Known issue
+
+Micro-cap `low_leverage` returns all zeros / NaN Sharpe — the debt/equity field
+is too sparse in that universe for the decile mask to select anything. Needs a
+minimum-coverage guard in `run_track()`.
+
 ## 7. What this implies
 
 1. **Buy-and-hold SPY beat every strategy tested in this project** — gap-hold longs, PEAD, episodic
