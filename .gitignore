@@ -15,3 +15,16 @@ heartbeat.txt
 .DS_Store
 backtest_results/
 screener_cache/
+
+# Cached market data — large, regenerable, machine-specific.
+# ibkr_bars/ is ~52MB of live 1-min bar JSON written by the runner.
+# data_cache/ is config.CACHE_DIR: the systematic pipeline's daily/fundamental store.
+# NOTE: gitignore has no trailing-comment support — keep comments on their own lines.
+ibkr_bars/
+data_cache/
+*.parquet
+
+# Runtime state
+logs/
+bot/live/session_state.json
+.claude/worktrees/
